@@ -21,6 +21,21 @@ frappe.views.ReportView = class ReportView extends frappe.views.ListView {
 		this.view = "Report";
 
 		const route = frappe.get_route();
+		if (route.length === 3) {
+			let defRpt = route[1] + " Default";
+			return frappe.db.exists("Report", defRpt)
+				.then((x) => {
+					if (x) {
+						route.push(defRpt);
+					}
+					return this.do_setup_defaults(route);
+				});
+		} else {
+			return this.do_setup_defaults(route);
+		}
+	}
+
+	do_setup_defaults(route) {
 		if (route.length === 4) {
 			this.report_name = route[3];
 		}
@@ -695,9 +710,6 @@ frappe.views.ReportView = class ReportView extends frappe.views.ListView {
 	}
 
 	set_fields() {
-		// default fields
-		["name", "docstatus"].map((f) => this._add_field(f));
-
 		if (this.report_name && this.report_doc.json.fields) {
 			let fields = this.report_doc.json.fields.slice();
 			fields.forEach((f) => this._add_field(f[0], f[1]));
@@ -708,6 +720,9 @@ frappe.views.ReportView = class ReportView extends frappe.views.ListView {
 			fields.forEach((f) => this._add_field(f[0], f[1]));
 			return;
 		}
+
+		// default fields
+		["name", "docstatus"].map((f) => this._add_field(f));
 
 		this.set_default_fields();
 	}

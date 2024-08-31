@@ -423,8 +423,10 @@ def validate_link(doctype: str, docname: str, fields=None):
 	if not isinstance(docname, str):
 		frappe.throw(_("Document Name must be a string"))
 
+	parent_doctype = "Item Attribute" if doctype == "Item Attribute Value" else None
 	if doctype != "DocType" and not (
-		frappe.has_permission(doctype, "select") or frappe.has_permission(doctype, "read")
+		frappe.has_permission(doctype, "select", parent_doctype = parent_doctype) or
+		frappe.has_permission(doctype, "read", parent_doctype = parent_doctype)
 	):
 		frappe.throw(
 			_("You do not have Read or Select Permissions for {}").format(frappe.bold(doctype)),

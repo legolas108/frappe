@@ -714,7 +714,7 @@ def sendmail(
 	subject="No Subject",
 	message="No Message",
 	as_markdown=False,
-	delayed=True,
+	delayed=False,
 	reference_doctype=None,
 	reference_name=None,
 	unsubscribe_method=None,
@@ -831,7 +831,7 @@ def sendmail(
 	)
 
 	# build email queue and send the email if send_now is True.
-	return builder.process(send_now=now)
+	return builder.process(send_now=True) # now
 
 
 whitelisted = []
