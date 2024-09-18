@@ -613,6 +613,14 @@ export default class Grid {
 				? this.frm.doc[this.df.fieldname] || []
 				: this.df.data || this.get_modal_data();
 		}
+		// return ((data.length > 1) && (data[0].custom_item_full_name))?
+		// 	data.sort((a, b) => {
+		// 		return (a.custom_item_full_name === undefined? 1:
+		// 			(b.custom_item_full_name === undefined? -1:
+		// 			(a.custom_item_full_name.toLowerCase() <
+		// 				b.custom_item_full_name.toLowerCase()? -1: 1)));
+		// 	}):
+		// 	data;
 		return data;
 	}
 
@@ -635,6 +643,9 @@ export default class Grid {
 		let fieldname = df.fieldname;
 		let fieldtype = df.fieldtype;
 		let fieldvalue = data[fieldname];
+
+		if ((fieldname === "item_code") && data["custom_item_full_name"])
+			fieldvalue += ": " + data["custom_item_full_name"];
 
 		if (fieldtype === "Check") {
 			value = frappe.utils.string_to_boolean(value);
