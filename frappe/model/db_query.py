@@ -215,7 +215,7 @@ class DatabaseQuery:
 
 		if self.distinct:
 			args.fields = "distinct " + args.fields
-			args.order_by = ""  # TODO: recheck for alternative
+			# args.order_by = ""  # TODO: recheck for alternative
 
 		# Postgres requires any field that appears in the select clause to also
 		# appear in the order by and group by clause

@@ -77,6 +77,7 @@ def get_count() -> int:
 
 
 def execute(doctype, *args, **kwargs):
+	kwargs["distinct"] = True
 	return DatabaseQuery(doctype).execute(*args, **kwargs)
 
 
