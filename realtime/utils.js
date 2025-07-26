@@ -4,7 +4,11 @@ function get_url(socket, path) {
 	if (!path) {
 		path = "";
 	}
-	return socket.request.headers.origin + path;
+	const referer = socket.request.headers.referer;
+	const portMatch = referer ? referer.match(/:(\d+)\//) : null;
+	const port = portMatch ? (":" + portMatch[1]) : '';
+
+	return socket.request.headers.origin + port + path;
 }
 
 // Authenticates a partial request created using superagent
