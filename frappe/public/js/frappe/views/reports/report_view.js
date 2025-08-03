@@ -174,10 +174,11 @@ frappe.views.ReportView = class ReportView extends frappe.views.ListView {
 
 	set_link_title_field_value() {
 		Object.keys(this.link_title_doctype_fields).forEach(async (key) => {
-			let link_title = await this.get_link_title_field_value(
-				this.link_title_doctype_fields[key],
-				key
-			);
+			// let link_title = await this.get_link_title_field_value(
+			// 	this.link_title_doctype_fields[key],
+			// 	key
+			// );
+			let link_title = undefined; // want to see ID (name) instead of title in reports
 
 			if (link_title !== undefined) {
 				document.querySelectorAll(`a[data-name="${key}"]`).forEach((el) => {
