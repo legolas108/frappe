@@ -8,7 +8,8 @@ function get_url(socket, path) {
 	const portMatch = referer ? referer.match(/:(\d+)\//) : null;
 	const port = portMatch ? (":" + portMatch[1]) : '';
 
-	return socket.request.headers.origin + port + path;
+	const origin = socket.request.headers.origin.replace(/:(\d+)\/?$/, "");
+	return origin + port + path;
 }
 
 // Authenticates a partial request created using superagent
