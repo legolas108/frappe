@@ -1,3 +1,5 @@
+const util = require('util');
+
 const cookie = require("cookie");
 const request = require("superagent");
 const { get_url } = require("../utils");
@@ -6,6 +8,8 @@ const { get_conf } = require("../../node_utils");
 const conf = get_conf();
 
 function authenticate_with_frappe(socket, next) {
+	console.log("authenticate_with_frappe");
+
 	let namespace = socket.nsp.name;
 	namespace = namespace.slice(1, namespace.length); // remove leading `/`
 
@@ -30,6 +34,10 @@ function authenticate_with_frappe(socket, next) {
 		next(new Error("No authentication method used. Use cookie or authorization header."));
 		return;
 	}
+
+	console.log(util.inspect(socket.request));
+	console.log("socket.request.headers: " + JSON.stringify(socket.request.headers));
+	console.log("url: " + get_url(socket, "/api/method/frappe.realtime.get_user_info"));
 
 	let auth_req = request.get(get_url(socket, "/api/method/frappe.realtime.get_user_info"));
 	if (authorization_header) {
