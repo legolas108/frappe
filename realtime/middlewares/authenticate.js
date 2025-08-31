@@ -21,6 +21,7 @@ function authenticate_with_frappe(socket, next) {
 		next(new Error("Invalid origin"));
 		return;
 	}
+	socket.request.headers.origin = socket.request.headers.origin.replace("8064", "8443");
 
 	if (!socket.request.headers.cookie) {
 		next(new Error("No cookie transmitted."));
