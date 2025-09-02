@@ -124,7 +124,7 @@ class RealTimeClient {
 			host = host + ":" + port;
 			return host + `/${frappe.boot.sitename}`;
 		} else
-			return host;
+			return host + ":" + port;
 	}
 
 	subscribe(task_id, opts) {
