@@ -445,7 +445,7 @@ frappe.views.BaseList = class BaseList {
 		if (!filter) return;
 		return (
 			{
-				like: filter[3]?.replace(/^%?|%$/g, ""),
+				like: filter[3] && (typeof filter[3] === "string")? filter[3].replace(/^%?|%$/g, ""): filter[3],
 				"not set": null,
 			}[filter[2]] || filter[3]
 		);
