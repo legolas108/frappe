@@ -24,6 +24,33 @@ index ecc4a40..8221e54 100644
          this.keyboard.on('enter', () => {
              if (this.$focusedCell && !this.$editingCell) {
                  // enter keypress on focused cell
+diff --git a/node_modules/frappe-datatable/dist/frappe-datatable.css b/node_modules/frappe-datatable/dist/frappe-datatable.css
+index 591166f..8348062 100644
+--- a/node_modules/frappe-datatable/dist/frappe-datatable.css
++++ b/node_modules/frappe-datatable/dist/frappe-datatable.css
+@@ -7,9 +7,9 @@
+     --dt-orange: rgb(255, 160, 10);
+     --dt-text-color: #000000;
+     --dt-text-light: #dfe2e5;
+-    --dt-spacer-1: 0.25rem;
+-    --dt-spacer-2: 0.5rem;
+-    --dt-spacer-3: 1rem;
++    --dt-spacer-1: 0.125rem;
++    --dt-spacer-2: 0.25rem;
++    --dt-spacer-3: 0.5rem;
+     --dt-border-radius: 3px;
+     --dt-cell-bg: #fff;
+     --dt-focus-border-width: 2px;
+@@ -109,8 +109,7 @@
+ }
+ 
+ .dt-cell__content {
+-        padding: 0.5rem;
+-        padding: var(--dt-spacer-2);
++				padding: 0rem var(--dt-spacer-2);
+         border: 2px solid transparent;
+         border: var(--dt-focus-border-width) solid transparent;
+         height: 100%;
 diff --git a/node_modules/frappe-datatable/dist/frappe-datatable.js b/node_modules/frappe-datatable/dist/frappe-datatable.js
 index 9b6cb7a..339db18 100644
 --- a/node_modules/frappe-datatable/dist/frappe-datatable.js
