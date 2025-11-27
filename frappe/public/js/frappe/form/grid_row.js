@@ -573,7 +573,7 @@ export default class GridRow {
 
 				fields += `
 					<div class='control-input flex align-center form-control fields_order sortable-handle sortable'
-						style='display: block; margin-bottom: 5px; padding: 0 8px; cursor: pointer; height: 32px;' data-fieldname='${
+						style='display: block; margin-bottom: 5px; padding: 0 8px; cursor: pointer; height: 24px;' data-fieldname='${
 							docfield.fieldname
 						}'
 						data-label='${docfield.label}' data-type='${docfield.fieldtype}'>
@@ -587,7 +587,7 @@ export default class GridRow {
 							</div>
 							<div class='col-4' style='padding-top: 2px; margin-top:-2px;' title='${__("Columns")}'>
 								<input class='form-control column-width my-1 input-xs text-right'
-								style='height: 24px; max-width: 80px; background: var(--bg-color);'
+								style='height: 20px; max-width: 80px; background: var(--bg-color);'
 									value='${docfield.columns || cint(d.columns)}'
 									data-fieldname='${docfield.fieldname}' style='background-color: var(--modal-bg); display: inline'>
 							</div>

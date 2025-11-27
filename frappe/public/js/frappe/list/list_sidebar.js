@@ -279,10 +279,10 @@ frappe.views.ListSidebar = class ListSidebar {
 			return;
 		}
 
-		const message = __("Get more insights with");
+		const message = __("More insights with");
 		const link = "https://frappe.io/s/insights";
 		const cta = "Frappe Insights";
-		this.add_banner(message, link, cta);
+		// this.add_banner(message, link, cta);
 	}
 
 	add_crm_banner() {

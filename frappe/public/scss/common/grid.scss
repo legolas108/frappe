@@ -20,20 +20,20 @@
 	color: var(--gray-600);
 	background-color: var(--subtle-fg);
 	@include get_textstyle("sm", "regular");
-	height: 32px;
+	height: 24px;
 	padding: 0 !important;
 	border-top-left-radius: var(--border-radius-md);
 	border-top-right-radius: var(--border-radius-md);
 
 	&.with-filter {
-		height: 64px;
+		height: 48px;
 	}
 	.filter-row {
 		background-color: var(--bg-color);
 
 		.search {
 			// TODO: Align with table grid without overwriting padding if possible
-			padding: 4px 7px 4px 7px !important;
+			padding: 2px 6px !important;
 			border-bottom: 1px solid var(--table-border-color);
 		}
 	}
@@ -41,11 +41,11 @@
 	.grid-static-col,
 	.row-check,
 	.row-index {
-		height: 32px;
-		padding: 6px 8px !important;
+		height: 24px;
+		padding: 2px 6px !important;
 	}
 	.grid-static-col {
-		padding: 6px 8px !important;
+		padding: 2px 6px !important;
 		.static-area {
 			&.reqd:after {
 				content: " *";
@@ -62,12 +62,10 @@
 }
 
 .data-row textarea {
-	height: 38px;
+	height: 24px;
 }
 
 .form-grid .data-row {
-	// padding: 10px 15px;
-
 	&.highlight {
 		background-color: var(--yellow-highlight-color);
 	}
@@ -106,6 +104,9 @@
 	button.col:focus-visible {
 		outline: 1px solid #c9c9c9;
 	}
+	.checkbox {
+		margin-top: 3px !important;
+	}
 }
 
 .grid-empty,
@@ -124,21 +125,21 @@
 }
 .grid-static-col,
 .row-index {
-	height: 38px;
+	height: 24px;
 	max-height: 200px;
 
 	&.search {
-		padding: 7px !important;
+		padding: 0 6px !important;
 
 		input {
-			height: -webkit-fill-available;
-			padding: 3px 7px;
+			height: 20px;
+			padding: 0px 6px;
 		}
 	}
 }
 
 .row-check {
-	height: 38px;
+	height: 24px;
 	text-align: center;
 
 	input {
@@ -146,12 +147,13 @@
 	}
 
 	&.search {
-		padding: var(--grid-padding) !important;
+		padding: 2px 6px !important;
 	}
 }
 
 .grid-row-check {
-	margin-top: 2px;
+	margin-top: 3px;
+	margin-left: 11px;
 
 	&::after {
 		// Extend the checkbox's clickable area
@@ -197,7 +199,7 @@
 	}
 
 	.col {
-		padding: var(--grid-padding);
+		padding: 2px 6px !important;
 		border-right: 1px solid var(--table-border-color);
 		// overflow: hidden;
 	}
@@ -215,7 +217,8 @@
 	.btn-open-row {
 		display: flex;
 		justify-content: center;
-		line-height: unset;
+		padding-right: 6px;
+		line-height: 1rem;
 		div {
 			margin-left: var(--margin-xs);
 		}
@@ -247,13 +250,15 @@
 		.ql-editor {
 			border-radius: 0px;
 			border: 0px;
-			padding-top: 10px;
-			padding-bottom: 10px;
-			height: 38px;
+			padding-top: 0px;
+			padding-bottom: 0px;
+			height: 24px;
 		}
 
 		.link-btn {
-			top: 5px;
+			top: 0px;
+			line-height: 1.5;
+			padding: 0 4px;
 			background-color: var(--bg-color);
 		}
 
@@ -340,7 +345,7 @@
 }
 
 .grid-row {
-	padding: 0px var(--padding-md);
+	padding: 0px var(--padding-sm);
 	border-bottom: 1px solid var(--table-border-color);
 	@include transition(0.2s);
 	// REDESIGN TODO: Fix border bottom for last item
