@@ -151,6 +151,9 @@
 	// Enable tnum for report
 	.dt-scrollable .dt-cell__content {
 		font-feature-settings: "tnum";
+		&:has(> input[type="checkbox"]) {
+			padding: 2px calc(50% - var(--dt-focus-border-width) - var(--checkbox-size) / 2);
+		}
 	}
 
 	.dt-cell__content--header-0,
