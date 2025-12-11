@@ -81,8 +81,8 @@
 }
 
 .list-row {
-	padding: 15px 15px 15px 0px;
-	height: 40px;
+	padding: 0px 8px 2px 0px;
+	height: 28px;
 	cursor: pointer;
 	transition: color 0.2s;
 	-webkit-transition: color 0.2s;
@@ -171,7 +171,7 @@
 	cursor: default;
 	background-color: var(--subtle-fg);
 	height: 30px;
-	margin: 0.5rem var(--padding-xs);
+	margin: 2px var(--padding-xs) 0 var(--padding-xs);
 	border-radius: var(--border-radius-md);
 
 	.list-check-all {

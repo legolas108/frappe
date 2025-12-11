@@ -16,7 +16,7 @@
 .indicator-pill,
 .indicator-pill-right {
 	@include get_textstyle("sm", "regular");
-	padding: 4.5px 8px;
+	padding: 2px 8px;
 	border-radius: var(--border-radius-full);
 	height: 20px;
 }
