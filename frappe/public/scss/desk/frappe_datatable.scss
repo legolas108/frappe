@@ -82,8 +82,6 @@
 	}
 
 	.checkbox {
-		margin: 7px 0 7px 8px;
-
 		.label-area {
 			display: none;
 		}
@@ -95,6 +93,9 @@
 
 	.dt-cell__edit {
 		padding: 0;
+		&:has(input[type="checkbox"]) {
+			padding: 2px calc(50% - var(--dt-focus-border-width) - var(--checkbox-size) / 2);
+		}
 		border: var(--dt-focus-border-width) solid #9bccf8;
 
 		input[type="text"] {
