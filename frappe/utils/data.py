@@ -2207,6 +2207,8 @@ def get_filter(doctype: str, filters: FilterSignature, filters_config=None) -> "
 		"<=",
 		"like",
 		"not like",
+		"rlike",
+		"not rlike",
 		"in",
 		"not in",
 		"is",
@@ -2222,7 +2224,8 @@ def get_filter(doctype: str, filters: FilterSignature, filters_config=None) -> "
 		valid_operators = tuple(set(valid_operators + tuple(additional_operators)))
 
 	if f.operator.lower() not in valid_operators:
-		frappe.throw(frappe._("Operator must be one of {0}").format(", ".join(valid_operators)))
+		ops = "', '".join(valid_operators)
+		frappe.throw(frappe._("Operator '{0}' must be one of '{1}'").format(f.operator.lower(), ops))
 
 	if f.doctype and (f.fieldname not in default_fields + optional_fields + child_table_fields):
 		# verify fieldname belongs to the doctype

@@ -50,6 +50,10 @@
 	.dt-header {
 		.dt-row[data-is-filter] {
 			display: flex !important;
+			height: 30px;
+			.dt-cell {
+				height: 30px;
+			}
 		}
 
 		.dt-row-header {
@@ -63,7 +67,7 @@
 	}
 
 	.dt-row {
-		height: 35px;
+		height: 28px;
 	}
 
 	.form-group {
@@ -79,8 +83,6 @@
 	}
 
 	.checkbox {
-		margin: 7px 0 7px 8px;
-
 		.label-area {
 			display: none;
 		}
@@ -92,11 +94,14 @@
 
 	.dt-cell__edit {
 		padding: 0;
+		&:has(input[type="checkbox"]) {
+			padding: 2px calc(50% - var(--dt-focus-border-width) - var(--checkbox-size) / 2);
+		}
 		border: var(--dt-focus-border-width) solid #9bccf8;
 
 		input[type="text"] {
 			font-size: inherit;
-			height: 27px;
+			height: 24px;
 
 			&:focus {
 				box-shadow: none;
@@ -119,12 +124,12 @@
 
 	.dt-row-filter {
 		.dt-cell__content {
-			padding: var(--padding-xs);
+			padding: 2px var(--dt-spacer-2);
 		}
 
 		.dt-filter.dt-input {
 			border-radius: var(--border-radius);
-			height: 100%;
+			height: 20px;
 			background-color: var(--control-bg);
 			padding-left: 8px;
 
@@ -147,11 +152,14 @@
 	// Enable tnum for report
 	.dt-scrollable .dt-cell__content {
 		font-feature-settings: "tnum";
+		&:has(> input[type="checkbox"]) {
+			padding: 2px calc(50% - var(--dt-focus-border-width) - var(--checkbox-size) / 2);
+		}
 	}
 
 	.dt-cell__content--header-0,
 	.dt-cell__content--col-0 {
-		padding: 0.5rem;
+		padding: 0.125rem 0.5rem;
 	}
 
 	.dt-scrollable--highlight-all {

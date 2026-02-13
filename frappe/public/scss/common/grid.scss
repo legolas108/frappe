@@ -20,7 +20,7 @@
 	border-bottom: 1px solid var(--table-border-color);
 	color: var(--gray-600);
 	@include get_textstyle("sm", "regular");
-	height: 32px;
+	height: 24px;
 	padding: 0 !important;
 	border-top-left-radius: var(--border-radius-md);
 	border-top-right-radius: var(--border-radius-md);
@@ -39,7 +39,7 @@
 	}
 
 	&.with-filter {
-		height: 66px;
+		height: 48px;
 		.grid-row:nth-child(2) {
 			.row-check,
 			.row-index {
@@ -52,7 +52,7 @@
 
 		.search {
 			// TODO: Align with table grid without overwriting padding if possible
-			padding: 4px 7px 4px 7px !important;
+			padding: 2px 6px !important;
 			background-color: var(--fg-color);
 		}
 	}
@@ -60,8 +60,8 @@
 	.grid-static-col,
 	.row-check,
 	.row-index {
-		height: 32px;
-		padding: 4px 8px !important;
+		height: 24px;
+		padding: 2px 6px !important;
 		background-color: var(--subtle-fg);
 	}
 	.row-check,
@@ -74,7 +74,7 @@
 		left: 31px;
 	}
 	.grid-static-col {
-		padding: 6px 8px !important;
+		padding: 2px 6px !important;
 		&.grid-data-column {
 			flex: 1;
 			max-width: none;
@@ -95,12 +95,10 @@
 }
 
 .data-row textarea {
-	height: 38px;
+	height: 24px;
 }
 
 .form-grid .data-row {
-	// padding: 10px 15px;
-
 	&.highlight {
 		background-color: var(--yellow-highlight-color);
 	}
@@ -149,6 +147,9 @@
 	button.col:focus-visible {
 		outline: 1px solid #c9c9c9;
 	}
+	.checkbox {
+		margin-top: 3px !important;
+	}
 }
 
 .grid-empty,
@@ -173,21 +174,21 @@
 }
 .grid-static-col,
 .row-index {
-	height: 43px;
+	height: 24px;
 	max-height: 200px;
 
 	&.search {
-		padding: 7px !important;
+		padding: 0 6px !important;
 
 		input {
-			height: 100%;
-			padding: 3px 7px;
+			height: 20px;
+			padding: 0px 6px;
 		}
 	}
 }
 
 .row-check {
-	// height: 38px;
+	// height: 24px;
 	text-align: center;
 	flex-grow: 0;
 
@@ -197,12 +198,13 @@
 	}
 
 	&.search {
-		padding: var(--grid-padding) !important;
+		padding: 2px 6px !important;
 	}
 }
 
 .grid-row-check {
 	margin-top: 3px;
+	margin-left: 11px;
 
 	&::after {
 		// Extend the checkbox's clickable area
@@ -252,7 +254,7 @@
 	}
 
 	.col {
-		padding: var(--grid-padding);
+		padding: 2px 6px !important;
 		border-right: 1px solid var(--table-border-color);
 		// overflow: hidden;
 	}
@@ -274,7 +276,8 @@
 	}
 
 	.btn-open-row {
-		line-height: unset;
+		padding-right: 6px;
+		line-height: 1rem;
 		div {
 			margin-left: var(--margin-xs);
 		}
@@ -292,7 +295,8 @@
 		}
 
 		.frappe-control[data-fieldtype="Select"].form-group .select-icon {
-			top: 9px;
+			top: 0px;
+			right: 0px;
 		}
 
 		.checkbox {
@@ -309,13 +313,15 @@
 		.ql-editor {
 			border-radius: 0px;
 			border: 0px;
-			padding-top: 10px;
-			padding-bottom: 10px;
-			height: auto;
+			padding-top: 0px;
+			padding-bottom: 0px;
+			height: 24px;
 		}
 
 		.link-btn {
-			top: 5px;
+			top: 0px;
+			line-height: 1.5;
+			padding: 0px 4px;
 			background-color: var(--bg-color);
 		}
 

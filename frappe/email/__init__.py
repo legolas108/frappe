@@ -116,7 +116,7 @@ def sendmail(
 	subject="No Subject",
 	message="No Message",
 	as_markdown=False,
-	delayed=True,
+	delayed=False,
 	reference_doctype=None,
 	reference_name=None,
 	unsubscribe_method=None,
@@ -249,6 +249,7 @@ def sendmail(
 	# build email queue and send the email if send_now is True.
 
 	q = builder.process(send_now=False)
-	if now and q:
+	# if now and q:
+	if q:
 		frappe.db.after_commit.add(q.send)
 	return q
