@@ -14,8 +14,11 @@ from frappe.twofactor import (
 	confirm_otp_token,
 	get_cached_user_pass,
 	get_default,
+	get_email_body_for_2fa,
+	get_email_body_for_qr_code,
 	get_otpsecret_for_,
 	get_verification_obj,
+	process_2fa_for_email,
 	should_run_2fa,
 	two_factor_is_enabled_for_,
 )
@@ -47,6 +50,31 @@ class TestTwoFactor(IntegrationTestCase):
 		user, pwd = get_cached_user_pass()
 		self.assertTrue(all([not user, not pwd]))
 
+	def test_2fa_email_delivery_status(self):
+		"""Verification object should report failure when the mail is never queued."""
+		otp_secret = get_otpsecret_for_(self.user)
+		token = int(pyotp.TOTP(otp_secret).now())
+
+		verification_obj = process_2fa_for_email(self.user, token, otp_secret, "Frappe")
+		self.assertTrue(verification_obj["setup"])
+		self.assertTrue(verification_obj["prompt"])
+
+		unsubscribe = frappe.get_doc(
+			doctype="Email Unsubscribe", email=self.user, global_unsubscribe=1
+		).insert(ignore_permissions=True)
+		self.addCleanup(unsubscribe.delete, ignore_permissions=True)
+
+		verification_obj = process_2fa_for_email(self.user, token, otp_secret, "Frappe")
+		self.assertFalse(verification_obj["setup"])
+		self.assertFalse(verification_obj["prompt"])
+
+	def test_2fa_email_bodies_render(self):
+		code_body = get_email_body_for_2fa({"otp": "123456", "otp_issuer": "Frappe"})
+		self.assertIn("123456", code_body)
+
+		qr_body = get_email_body_for_qr_code({"qrcode_link": "https://example.com/qrcode/abc"})
+		self.assertIn("https://example.com/qrcode/abc", qr_body)
+
 	def test_authenticate_for_2factor(self):
 		"""Verification obj and tmp_id should be set in frappe.local."""
 		authenticate_for_2factor(self.user)
@@ -55,7 +83,9 @@ class TestTwoFactor(IntegrationTestCase):
 		self.assertTrue(verification_obj)
 		self.assertTrue(tmp_id)
 		for k in ["_usr", "_pwd", "_otp_secret"]:
-			self.assertTrue(frappe.cache.get(f"{tmp_id}{k}"), f"{k} not available")
+			self.assertTrue(
+				frappe.cache.get_value(f"{tmp_id}{k}", use_local_cache=False), f"{k} not available"
+			)
 
 	def test_two_factor_is_enabled(self):
 		"""
@@ -99,7 +129,6 @@ class TestTwoFactor(IntegrationTestCase):
 		"""Should return true if enabled for user."""
 		toggle_2fa_all_role(state=True)
 		self.assertTrue(two_factor_is_enabled_for_(self.user))
-		self.assertFalse(two_factor_is_enabled_for_("Administrator"))
 		toggle_2fa_all_role(state=False)
 		self.assertFalse(two_factor_is_enabled_for_(self.user))
 

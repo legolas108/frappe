@@ -16,7 +16,7 @@ import redis
 from redis.exceptions import BusyLoadingError, ConnectionError
 from rq import Callback, Queue, Worker
 from rq.defaults import DEFAULT_WORKER_TTL
-from rq.exceptions import InvalidJobOperation, NoSuchJobError
+from rq.exceptions import DeserializationError, InvalidJobOperation, NoSuchJobError
 from rq.job import Job, JobStatus
 from rq.logutils import setup_loghandlers
 from rq.timeouts import JobTimeoutException
@@ -241,7 +241,7 @@ def execute_job(site, method, event, job_name, kwargs, user=None, is_async=True,
 	retval = None
 
 	if is_async:
-		frappe.init(site, force=True)
+		frappe.init(site, force=True, is_job=True)
 		frappe.connect()
 		if os.environ.get("CI"):
 			from frappe.tests.utils import toggle_test_mode
@@ -307,7 +307,7 @@ def execute_job(site, method, event, job_name, kwargs, user=None, is_async=True,
 
 	finally:
 		if not hasattr(frappe.local, "site"):
-			frappe.init(site, force=True)
+			frappe.init(site, force=True, is_job=True)
 			frappe.connect()
 		for after_job_task in frappe.get_hooks("after_job"):
 			frappe.call(after_job_task, method=method_name, kwargs=kwargs, result=retval)
@@ -332,13 +332,11 @@ def start_worker(
 
 	_start_sentry()
 
-	with frappe.init_site():
-		# empty init is required to get redis_queue from common_site_config.json
-		redis_connection = get_redis_conn(username=rq_username, password=rq_password)
+	redis_connection = get_redis_conn(username=rq_username, password=rq_password)
 
-		if queue:
-			queue = [q.strip() for q in queue.split(",")]
-		queues = get_queue_list(queue, build_queue_name=True)
+	if queue:
+		queue = [q.strip() for q in queue.split(",")]
+	queues = get_queue_list(queue, build_queue_name=True)
 
 	if os.environ.get("CI"):
 		setup_loghandlers("ERROR")
@@ -423,6 +421,8 @@ def start_worker_pool(
 	_start_sentry()
 
 	# If gc.freeze is done then importing modules before forking allows us to share the memory
+	import filelock  # monitor.flush() takes a filelock inside the forked work horse
+
 	import frappe.database.query  # sqlparse and indirect imports
 	import frappe.query_builder  # pypika
 	import frappe.utils  # common utils
@@ -432,12 +432,11 @@ def start_worker_pool(
 	import frappe.website.path_resolver  # all the page types and resolver
 	# end: module pre-loading
 
-	with frappe.init_site():
-		redis_connection = get_redis_conn()
+	redis_connection = get_redis_conn()
 
-		if queue:
-			queue = [q.strip() for q in queue.split(",")]
-		queues = get_queue_list(queue, build_queue_name=True)
+	if queue:
+		queue = [q.strip() for q in queue.split(",")]
+	queues = get_queue_list(queue, build_queue_name=True)
 
 	if os.environ.get("CI"):
 		setup_loghandlers("ERROR")
@@ -492,7 +491,9 @@ def get_jobs(site=None, queue=None, key="method"):
 		q = get_queue(_queue)
 		jobs = q.jobs + get_running_jobs_in_queue(q)
 		for job in jobs:
-			if job.kwargs.get("site"):
+			if not (queue_args := get_queue_args(job)):
+				continue
+			if queue_args.get("site"):
 				# if job belongs to current site, or if all jobs are requested
 				if (job.kwargs["site"] == site) or site is None:
 					add_to_dict(job)
@@ -535,6 +536,14 @@ def get_running_jobs_in_queue(queue):
 	return jobs
 
 
+def get_queue_args(job: Job) -> dict:
+	"""Return the arguments `enqueue` stored on the job, or an empty dict when they no longer load (e.g. its method was renamed)."""
+	try:
+		return job.kwargs
+	except DeserializationError:
+		return {}
+
+
 def get_queue(qtype: str, is_async: bool = True) -> Queue:
 	"""
 	Return a Queue object tied to a redis connection.
@@ -569,10 +578,7 @@ def validate_queue(queue: str, default_queue_list: list | None = None) -> None:
 	reraise=True,
 )
 def get_redis_conn(username=None, password=None):
-	if not hasattr(frappe.local, "conf"):
-		raise Exception("You need to call frappe.init")
-
-	conf = frappe.get_site_config()
+	conf = frappe.get_conf()
 	if not conf.redis_queue:
 		raise Exception("redis_queue missing in common_site_config.json")
 
@@ -709,7 +715,7 @@ def truncate_failed_registry(job, connection, type, value, traceback):
 	"""Ensures that number of failed jobs don't exceed specified limits."""
 	from frappe.utils import create_batch
 
-	conf = frappe.conf if frappe.conf else frappe.get_conf(site=job.kwargs.get("site"))
+	conf = frappe.conf if frappe.conf else frappe.get_conf(site=get_queue_args(job).get("site"))
 	limit = (conf.get("rq_failed_jobs_limit") or RQ_FAILED_JOBS_LIMIT) - 1
 
 	for queue in get_queues(connection=connection):
@@ -788,6 +794,7 @@ def _start_sentry():
 		auto_enabling_integrations=False,
 		default_integrations=False,
 		integrations=integrations,
+		include_local_variables=False,
 		_experiments=experiments,
 		**kwargs,
 	)

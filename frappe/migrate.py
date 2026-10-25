@@ -117,7 +117,15 @@ class SiteMigration:
 
 	@atomic
 	def pre_schema_updates(self):
-		"""Executes `before_migrate` hooks"""
+		"""Registers modules declared since the last migrate, then executes `before_migrate` hooks"""
+		from frappe.installer import sync_module_defs
+
+		# This runs before the hooks and before either patch pass, because everything downstream
+		# that names a module, such as a patch, a workspace or a module sidebar, needs the row to
+		# exist first. A module an app added after it was installed has no row until this runs.
+		if added := sync_module_defs():
+			print(f"Registered new modules: {comma_and(added, add_quotes=False)}")
+
 		overrides = defaultdict(list)
 		for app in frappe.get_installed_apps():
 			for fn in frappe.get_hooks("before_migrate", app_name=app):
@@ -160,6 +168,12 @@ class SiteMigration:
 		"""
 		print("Syncing jobs...")
 		sync_jobs()
+
+		from frappe.database.sequence import create_missing_sequences
+
+		if recreated := create_missing_sequences():
+			print(f"Recreated missing sequences for: {', '.join(recreated)}")
+
 		if not self.skip_fixtures:
 			print("Syncing fixtures...")
 			sync_fixtures()

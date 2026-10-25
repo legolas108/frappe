@@ -121,7 +121,7 @@ frappe.ui.form.Layout = class Layout {
 		}
 
 		// Add close button to block if not permanent
-		const close_message = $(`<div class="close-message">${frappe.utils.icon("close")}</div>`);
+		const close_message = $(`<div class="close-message">${frappe.utils.icon("x")}</div>`);
 		if (!permanent) {
 			close_message.appendTo($html);
 			close_message.on("click", () => $html.remove());
@@ -136,6 +136,8 @@ frappe.ui.form.Layout = class Layout {
 
 		// Show parent container if hidden
 		this.message.removeClass("hidden");
+
+		return $html;
 	}
 
 	render(new_fields) {
@@ -456,13 +458,13 @@ frappe.ui.form.Layout = class Layout {
 		// Set active tab based on hash (for regular forms only)
 		const tab_from_hash = window.location.hash.replace("#", "");
 		const tab = this.tabs.find((tab) => tab.df.fieldname === tab_from_hash);
-		if (tab) {
+		if (tab && !tab.is_hidden()) {
 			tab.set_active();
 			return;
 		}
 
 		let frm_active_tab = this.frm?.get_active_tab?.();
-		if (frm_active_tab) {
+		if (frm_active_tab && !frm_active_tab.is_hidden()) {
 			frm_active_tab.set_active();
 		} else if (this.tabs.length) {
 			// set first tab as active when opening for first time, or new doc
@@ -504,7 +506,7 @@ frappe.ui.form.Layout = class Layout {
 					collapse = !this.evaluate_depends_on_value(df.collapsible_depends_on);
 				}
 
-				if (collapse && section.has_missing_mandatory()) {
+				if (collapse && (section.has_missing_mandatory() || section.expanded_by_user)) {
 					collapse = false;
 				}
 
@@ -745,7 +747,7 @@ frappe.ui.form.Layout = class Layout {
 
 			if (f.df.fieldtype === "Table") {
 				for (const row of f.grid?.grid_rows || []) {
-					row.refresh_dependency();
+					row?.refresh_dependency();
 				}
 			}
 		}
@@ -802,9 +804,6 @@ frappe.ui.form.Layout = class Layout {
 		} else if (expression.substr(0, 5) == "eval:") {
 			try {
 				out = frappe.utils.eval(expression.substr(5), { doc, parent });
-				if (parent && parent.istable && expression.includes("is_submittable")) {
-					out = true;
-				}
 			} catch (e) {
 				frappe.throw(__('Invalid "depends_on" expression'));
 			}

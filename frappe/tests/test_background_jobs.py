@@ -3,6 +3,7 @@ from contextlib import contextmanager
 from unittest.mock import patch
 
 from rq import Queue
+from rq.job import Job
 from werkzeug.local import Local
 
 import frappe
@@ -14,6 +15,7 @@ from frappe.utils.background_jobs import (
 	create_job_id,
 	execute_job,
 	generate_qname,
+	get_jobs,
 	get_redis_conn,
 )
 
@@ -53,6 +55,36 @@ class TestBackgroundJobs(IntegrationTestCase):
 
 		# lesser is earlier
 		self.assertTrue(high_priority_job.get_position() < low_priority_job.get_position())
+
+	def test_get_jobs_skips_job_with_renamed_method(self):
+		job = frappe.enqueue(method=fail_function, queue="short")
+		stale_job = Job.fetch(job.id, connection=get_redis_conn())
+		with (
+			patch.dict(globals()),
+			patch("frappe.utils.background_jobs.get_running_jobs_in_queue", return_value=[stale_job]),
+		):
+			del globals()["fail_function"]
+			jobs = get_jobs(site=frappe.local.site, queue="short")
+		self.assertNotIn(fail_function, jobs[frappe.local.site])
+
+	def test_job_translation_resolves_user_language(self):
+		real_get_cached_value = frappe.get_cached_value
+
+		def user_language_de(doctype, name, fieldname=None, *args, **kwargs):
+			if doctype == "User" and fieldname == "language":
+				return "de"
+			return real_get_cached_value(doctype, name, fieldname, *args, **kwargs)
+
+		frappe.local.job = frappe._dict(user="Administrator")
+		self.addCleanup(delattr, frappe.local, "job")
+		original_lang = frappe.local.lang
+		self.addCleanup(setattr, frappe.local, "lang", original_lang)
+		frappe.local.lang = "en"
+
+		with patch("frappe.get_cached_value", side_effect=user_language_de):
+			frappe._("Home")
+
+		self.assertEqual(frappe.local.lang, "de")
 
 	def test_job_hooks(self):
 		self.addCleanup(lambda: _test_JOB_HOOK.clear())
@@ -95,12 +127,24 @@ def after_job(*args, **kwargs):
 def freeze_local():
 	locals = frappe.local
 	frappe.local = Local()
-	yield locals
-	frappe.local = locals
+	try:
+		yield locals
+	finally:
+		# without the restore, every test running after this one in the same
+		# process sees an unbound frappe.local and fails
+		frappe.local = locals
 
 
-def patch_job_hooks(event: str):
-	return {
+_real_get_hooks = frappe.get_hooks
+
+
+def patch_job_hooks(event: str, *args, **kwargs):
+	test_hooks = {
 		"before_job": ["frappe.tests.test_background_jobs.before_job"],
 		"after_job": ["frappe.tests.test_background_jobs.after_job"],
-	}[event]
+	}
+	if event in test_hooks:
+		return test_hooks[event]
+	# anything else the job execution looks up (e.g. typing_validations'
+	# require_type_annotated_api_methods) must behave as usual
+	return _real_get_hooks(event, *args, **kwargs)

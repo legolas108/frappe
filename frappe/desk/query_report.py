@@ -4,20 +4,26 @@
 import datetime
 import json
 import os
+import re
 from datetime import timedelta
-from typing import Any
+from html import unescape
+from typing import TYPE_CHECKING, Any
 
 import frappe
 import frappe.desk.reportview
 from frappe import _
 from frappe.core.utils import ljust_list
+from frappe.desk.link_title import get_report_link_titles, send_link_titles
 from frappe.desk.reportview import clean_params, parse_json
 from frappe.model.utils import render_include
 from frappe.modules import get_module_path, scrub
 from frappe.monitor import add_data_to_monitor
 from frappe.permissions import get_role_permissions, get_roles, has_permission
-from frappe.utils import cint, cstr, flt, format_duration, get_html_format, sbool
+from frappe.utils import cint, cstr, flt, format_datetime, format_duration, formatdate, get_html_format, sbool
 from frappe.utils.caching import request_cache
+
+if TYPE_CHECKING:
+	from frappe.utils.xlsxutils import XLSXMetadata
 
 
 def get_report_doc(report_name):
@@ -57,6 +63,32 @@ def get_report_doc(report_name):
 	return doc
 
 
+@frappe.whitelist()
+def get_print_format_data(print_format: str):
+	pf = frappe.db.get_value(
+		"Print Format",
+		{"name": print_format, "disabled": 0, "print_format_for": "Report"},
+		["report", "html", "css"],
+		as_dict=True,
+	)
+	if not pf:
+		frappe.throw(
+			_("{0} is not an enabled Print Format for a Report").format(frappe.bold(print_format)),
+			frappe.DoesNotExistError,
+		)
+
+	# get_report_doc enforces the referenced Report's own permission model before we hand out its print format
+	report = get_report_doc(pf.report)
+
+	if not frappe.has_permission(report.ref_doctype, "print"):
+		frappe.throw(
+			_("You don't have permission to print: {0}").format(_(report.ref_doctype)),
+			frappe.PermissionError,
+		)
+
+	return {"html": pf.html, "css": pf.css}
+
+
 def get_report_result(report, filters):
 	res = None
 
@@ -75,7 +107,12 @@ def get_report_result(report, filters):
 
 @frappe.read_only()
 def generate_report_result(
-	report, filters=None, user=None, custom_columns=None, is_tree=False, parent_field=None
+	report,
+	filters=None,
+	user=None,
+	custom_columns=None,
+	is_tree=False,
+	parent_field=None,
 ):
 	user = user or frappe.session.user
 	filters = filters or []
@@ -93,8 +130,13 @@ def generate_report_result(
 	result = normalize_result(result, columns)
 
 	if report.get("custom_columns"):
-		# saved columns (with custom columns / with different column order)
-		columns = report.custom_columns
+		# keep saved columns still returned by this run, plus user-added
+		# custom columns (`link_field`); drops columns stale after a filter change
+		columns = [
+			column
+			for column in report.custom_columns
+			if column.get("link_field") or column["fieldname"] in report_column_names
+		]
 
 	# unsaved custom_columns
 	if custom_columns:
@@ -110,14 +152,15 @@ def generate_report_result(
 	if result:
 		result = get_filtered_data(report.ref_doctype, columns, result, user)
 
-	if cint(report.add_total_row) and result and not skip_total_row:
+	has_total_row = cint(report.add_total_row) and result and not skip_total_row
+
+	if has_total_row:
 		result = add_total_row(result, columns, is_tree=is_tree, parent_field=parent_field)
 
 	if isinstance(filters, dict) and filters.get("translate_data"):
-		total_row = cint(report.add_total_row) and result and not skip_total_row
-		result = translate_report_data(result, total_row)
+		result = translate_report_data(result, has_total_row)
 
-	return {
+	return_dict = {
 		"result": result,
 		"columns": columns,
 		"message": message,
@@ -127,6 +170,24 @@ def generate_report_result(
 		"status": None,
 		"execution_time": frappe.cache.hget("report_execution_time", report.name) or 0,
 	}
+
+	if report.snapshot_report and report.doctype_to_sync:
+		if latest_sync := frappe.db.get_all(
+			"DuckDB Sync",
+			filters={"doc_type": report.doctype_to_sync[0].doc_type, "docstatus": 1},
+			fields=["creation"],
+			pluck="creation",
+			order_by="creation desc",
+			limit=1,
+		):
+			return_dict.update(
+				{
+					"snapshot_report": True,
+					"snapshot_at": latest_sync[0],
+				}
+			)
+
+	return return_dict
 
 
 def normalize_result(result, columns):
@@ -146,7 +207,7 @@ def normalize_result(result, columns):
 
 
 @frappe.whitelist()
-def get_script(report_name):
+def get_script(report_name: str):
 	report = get_report_doc(report_name)
 	module = report.module or frappe.db.get_value("DocType", report.ref_doctype, "module")
 
@@ -171,7 +232,7 @@ def get_script(report_name):
 		script += f"\n\n//# sourceURL={scrub(report.name)}__custom"
 
 	if not script:
-		script = "frappe.query_reports['{}']={{}}".format(report_name)
+		script = f"frappe.query_reports[{json.dumps(report_name)}]={{}}"
 
 	return {
 		"script": render_include(script),
@@ -192,16 +253,40 @@ def get_reference_report(report):
 @frappe.whitelist()
 @frappe.read_only()
 def run(
-	report_name,
-	filters=None,
-	user=None,
-	ignore_prepared_report=False,
-	custom_columns=None,
-	is_tree=False,
-	parent_field=None,
-	are_default_filters=True,
-	js_filters=None,
-):
+	report_name: str,
+	filters: str | dict | None = None,
+	user: str | None = None,  # Kept for backward compatibility
+	ignore_prepared_report: bool = False,
+	custom_columns: str | list | None = None,
+	is_tree: bool = False,
+	parent_field: str | None = None,
+	are_default_filters: bool = True,
+	js_filters: str | list | None = None,
+) -> dict:
+	return _run(
+		report_name=report_name,
+		filters=filters,
+		ignore_prepared_report=ignore_prepared_report,
+		custom_columns=custom_columns,
+		is_tree=is_tree,
+		parent_field=parent_field,
+		are_default_filters=are_default_filters,
+		js_filters=js_filters,
+	)
+
+
+def _run(
+	*,
+	report_name: str,
+	filters: str | dict | None = None,
+	user: str | None = None,
+	ignore_prepared_report: bool = False,
+	custom_columns: str | list | None = None,
+	is_tree: bool = False,
+	parent_field: str | None = None,
+	are_default_filters: bool = True,
+	js_filters: str | list | None = None,
+) -> dict:
 	if not user:
 		user = frappe.session.user
 	validate_filters_permissions(report_name, filters, user, js_filters)
@@ -217,13 +302,25 @@ def run(
 	if sbool(are_default_filters) and report.get("custom_filters"):
 		filters = report.custom_filters
 
+	is_prepared_report = report.prepared_report and not sbool(ignore_prepared_report) and not custom_columns
+
 	try:
-		if report.prepared_report and not sbool(ignore_prepared_report) and not custom_columns:
+		if is_prepared_report:
 			if filters:
 				if isinstance(filters, str):
 					filters = json.loads(filters)
 
 				dn = filters.pop("prepared_report_name", None)
+				if dn:
+					prepared_for = frappe.db.get_value(
+						"Prepared Report", {"name": dn, "owner": user}, "report_name"
+					)
+					if prepared_for != report_name and (
+						not prepared_for
+						or not frappe.db.exists("Report", prepared_for)
+						or get_reference_report(frappe.get_doc("Report", prepared_for)).name != report.name
+					):
+						frappe.has_permission("Prepared Report", "read", dn, throw=True)
 			else:
 				dn = ""
 			result = get_prepared_report_result(report, filters, dn, user)
@@ -231,7 +328,7 @@ def run(
 			result = generate_report_result(report, filters, user, custom_columns, is_tree, parent_field)
 			add_data_to_monitor(report=report.reference_report or report.name)
 	except Exception:
-		frappe.log_error("Report Error")
+		frappe.log_error("Report execution failed for: {}".format(report_name))
 		raise
 
 	result["add_total_row"] = report.add_total_row and not result.get("skip_total_row", False)
@@ -239,27 +336,30 @@ def run(
 	if sbool(are_default_filters) and report.get("custom_filters"):
 		result["custom_filters"] = report.custom_filters
 
+	# prepared reports can still carry legacy string column definitions
+	columns = [get_column_as_dict(column) for column in result.get("columns") or []]
+	send_link_titles(get_report_link_titles(columns, result.get("result")))
+
 	return result
 
 
 def add_custom_column_data(custom_columns, result):
-	doctype_names_from_custom_field = []
-	for column in custom_columns:
-		if len(column["fieldname"].split("-")) > 1:
-			# length greater than 1, means that the column is a custom field with confilicting fieldname
-			doctype_name = frappe.unscrub(column["fieldname"].split("-")[1])
-			doctype_names_from_custom_field.append(doctype_name)
-		column["fieldname"] = column["fieldname"].split("-")[0]
+	pending_columns = custom_columns
 
-	custom_column_data = get_data_for_custom_report(custom_columns, result)
+	while pending_columns:
+		custom_column_data = get_data_for_custom_report(pending_columns, result)
+		unresolved_columns = []
 
-	for column in custom_columns:
-		key = (column.get("doctype"), column.get("fieldname"))
-		if key in custom_column_data:
+		for column in pending_columns:
+			key = (column.get("doctype"), column.get("fieldname"))
+			if key not in custom_column_data:
+				unresolved_columns.append(column)
+				continue
+
 			for row in result:
 				link_field = column.get("link_field")
 
-				# backwards compatibile `link_field`
+				# backwards compatible `link_field`
 				# old custom reports which use `str` should not break.
 				if isinstance(link_field, str):
 					link_field = frappe._dict({"fieldname": link_field, "names": []})
@@ -268,15 +368,35 @@ def add_custom_column_data(custom_columns, result):
 				# possible if the row is empty
 				if not row_reference:
 					continue
-				if key[0] in doctype_names_from_custom_field:
-					column["fieldname"] = column.get("id")
 				row[column.get("fieldname")] = custom_column_data.get(key).get(row_reference)
+
+		if len(unresolved_columns) == len(pending_columns):
+			break
+
+		pending_columns = unresolved_columns
 
 	return result
 
 
+def get_user_facing_error(traceback: str | None) -> str:
+	"""Return the error message from a traceback, without the exception class."""
+
+	if not traceback:
+		return ""
+
+	lines = traceback.strip().splitlines()
+	message = lines[-1]
+	# a traceback ends in "module.Exception: message", a single line is already the message
+	if len(lines) > 1:
+		message = message.partition(": ")[2]
+
+	message = re.sub(r"<[^>]*>", " ", message)
+
+	return unescape(" ".join(message.split()))
+
+
 def get_prepared_report_result(report, filters, dn="", user=None):
-	from frappe.core.doctype.prepared_report.prepared_report import get_completed_prepared_report
+	from frappe.core.doctype.prepared_report.prepared_report import get_last_processed_prepared_report
 
 	def get_report_data(doc, data):
 		# backwards compatibility - prepared report used to have a columns field,
@@ -295,11 +415,17 @@ def get_prepared_report_result(report, filters, dn="", user=None):
 
 	report_data = {}
 	if not dn:
-		dn = get_completed_prepared_report(
+		dn = get_last_processed_prepared_report(
 			filters, user, report.get("custom_report") or report.get("report_name")
 		)
 
 	doc = frappe.get_doc("Prepared Report", dn) if dn else None
+	if doc and doc.status == "Error":
+		error = get_user_facing_error(doc.error_message)
+		# the client not requires the full traceback
+		doc.error_message = None
+		return {"prepared_report": True, "doc": doc, "error": error}
+
 	if doc:
 		try:
 			if data := json.loads(doc.get_prepared_data().decode("utf-8")):
@@ -367,15 +493,25 @@ def _export_query(form_params, csv_params, populate_response=True):
 	custom_columns = frappe.parse_json(form_params.custom_columns or "[]")
 	include_indentation = form_params.include_indentation
 	include_filters = form_params.include_filters
-	visible_idx = form_params.visible_idx
+	visible_idx = form_params.visible_idx or []  # excluding total row idx
+	ignore_visible_idx = sbool(form_params.get("ignore_visible_idx"))
 	include_hidden_columns = form_params.include_hidden_columns
 
 	if isinstance(visible_idx, str):
 		visible_idx = json.loads(visible_idx)
 
-	data = run(report_name, form_params.filters, custom_columns=custom_columns, are_default_filters=False)
+	data = run(
+		report_name,
+		form_params.filters,
+		custom_columns=custom_columns,
+		are_default_filters=False,
+	)
+
 	data = frappe._dict(data)
-	data.filters = form_params.applied_filters
+
+	data.report_name = report_name
+	data.filters = form_params.filters
+	data.applied_filters = form_params.applied_filters
 
 	if not data.columns:
 		frappe.respond_as_web_page(
@@ -384,30 +520,52 @@ def _export_query(form_params, csv_params, populate_response=True):
 		)
 		return
 
-	format_fields(data)
-	xlsx_data, column_widths, header_index = build_xlsx_data(
+	has_total_row = cint(data.get("add_total_row"))
+
+	# visible_idx is the client's display-order list of row indices into
+	# data.result. Iterate it as an ordered list (not a set) so the UI
+	# sort direction the user applied before Export survives into the file.
+	if visible_idx and not ignore_visible_idx:
+		row_count = len(data.result)
+		# Guard out-of-range indices in case the server's re-run returned
+		# fewer rows than the client had (data changed, or the report is
+		# non-deterministic).
+		filtered_result = [data.result[idx] for idx in visible_idx if 0 <= idx < row_count]
+
+		if has_total_row:
+			filtered_result = add_total_row(filtered_result, data.columns)
+
+		data["result"] = filtered_result
+
+	format_fields(data, file_format_type)
+
+	xlsx_data, column_widths, styles = build_xlsx_data(
 		data,
-		visible_idx,
-		include_indentation,
+		include_indentation=include_indentation,
 		include_filters=include_filters,
 		include_hidden_columns=include_hidden_columns,
+		build_styles=file_format_type == "Excel",
 	)
 
 	if file_format_type == "CSV":
+		file_extension = "csv"
 		content = get_csv_bytes(
 			[[handle_html(v) if isinstance(v, str) else v for v in r] for r in xlsx_data],
 			csv_params,
 		)
-		file_extension = "csv"
 	elif file_format_type == "Excel":
 		file_extension = "xlsx"
 		content = make_xlsx(
 			xlsx_data,
-			"Query Report",
+			report_name,
 			column_widths=column_widths,
-			header_index=header_index,
-			has_filters=bool(include_filters),
+			styles=styles,
 		).getvalue()
+	else:
+		frappe.throw(
+			title=_("Unsupported file format: {0}").format(file_format_type),
+			msg=_("Only CSV and Excel formats are supported for export"),
+		)
 
 	if include_filters:
 		for value in (data.filters or {}).values():
@@ -432,45 +590,78 @@ def valid_report_name(report_name, suffix):
 	return False
 
 
-def format_fields(data: frappe._dict) -> None:
+def format_fields(data: frappe._dict, file_format_type: str | None = None) -> None:
+	stringify_dates = file_format_type != "Excel"
+
 	for i, col in enumerate(data.columns):
 		if col.get("fieldtype") == "Duration":
 			for row in data.result:
 				index = col.get("fieldname") if isinstance(row, dict) else i
-				if row[index]:
-					row[index] = format_duration(row[index])
+				val = row.get(index) if isinstance(row, dict) else row[index]
+				if val:
+					row[index] = format_duration(val)
 		elif col.get("fieldtype") == "Currency" and col.get("precision"):
 			for row in data.result:
 				index = col.get("fieldname") if isinstance(row, dict) else i
-				if row[index]:
-					row[index] = round(row[index], col.get("precision"))
+				val = row.get(index) if isinstance(row, dict) else row[index]
+				if val:
+					row[index] = round(val, col.get("precision"))
+		elif col.get("fieldtype") == "Date" and stringify_dates:
+			for row in data.result:
+				index = col.get("fieldname") if isinstance(row, dict) else i
+				val = row.get(index) if isinstance(row, dict) else row[index]
+				if val:
+					row[index] = formatdate(val)
+		elif col.get("fieldtype") == "Datetime" and stringify_dates:
+			for row in data.result:
+				index = col.get("fieldname") if isinstance(row, dict) else i
+				val = row.get(index) if isinstance(row, dict) else row[index]
+				if val:
+					row[index] = format_datetime(val)
+		elif col.get("fieldtype") in ("Link", "Dynamic Link"):
+			for row in data.result:
+				index = col.get("fieldname") if isinstance(row, dict) else i
+				val = row.get(index) if isinstance(row, dict) else row[index]
+				if isinstance(val, str) and val.startswith("'") and val.endswith("'"):
+					row[index] = val[1:-1]
+
+
+def format_filter_value(value):
+	return ", ".join([cstr(x) for x in value]) if isinstance(value, list) else cstr(value)
 
 
 def build_xlsx_data(
 	data: frappe._dict,
-	visible_idx: list[int],
-	include_indentation: bool,
+	visible_idx: list[int] | None = None,
+	include_indentation: bool = False,
 	include_filters: bool = False,
 	ignore_visible_idx: bool = False,
 	include_hidden_columns: bool = False,
-) -> tuple[list[list[Any]], list[int], int]:
+	*,
+	build_styles: bool = False,
+) -> tuple[list[list[Any]], list[int], dict | None]:
 	"""
 	Build Excel data structure from report data with proper formatting.
 
 	Args:
-		data: Report data containing columns, result, and filters
-		visible_idx: List of row indices that are visible in the report
+		data: Report data containing columns, result, filters, applied_filters, report_name etc.
+		visible_idx: Deprecated (v17). Row indices to include.
 		include_indentation: Whether to include indentation for tree-like data
 		include_filters: Whether to include filter rows at the top of the Excel sheet
-		ignore_visible_idx: Whether to ignore the visible_idx parameter
+		ignore_visible_idx: Deprecated (v17). Skips visible_idx filtering.
 		include_hidden_columns: Whether to include columns marked as hidden
+		build_styles: Whether to build style metadata for Excel formatting
 
 	Returns:
 		tuple: A tuple containing:
 			- result: List of rows for the Excel sheet
 			- column_widths: List of column widths for the Excel sheet
-			- header_index: Index of the header row in the result
+			- styles: Dictionary of styles for Excel formatting (if applicable)
 	"""
+	from frappe.utils.xlsxutils import XLSXMetadata
+
+	metadata = None
+
 	EXCEL_TYPES = (
 		str,
 		bool,
@@ -482,8 +673,18 @@ def build_xlsx_data(
 		datetime.time,
 		datetime.timedelta,
 	)
+	if visible_idx or ignore_visible_idx:
+		from frappe.deprecation_dumpster import deprecation_warning
 
-	if len(visible_idx) == len(data.result) or not visible_idx:
+		deprecation_warning(
+			"2026-04-19",
+			"v17",
+			"The 'visible_idx' and 'ignore_visible_idx' parameters of build_xlsx_data are deprecated. "
+			"Filter data.result before calling build_xlsx_data instead.",
+		)
+
+	# NOTE: for backwards compatibility. remove in v17.
+	if not visible_idx or len(visible_idx) == len(data.result):
 		# It's not possible to have same length and different content.
 		ignore_visible_idx = True
 	else:
@@ -491,48 +692,82 @@ def build_xlsx_data(
 		visible_idx = set(visible_idx)
 
 	result = []
+	column_data = []
 	column_widths = []
-	header_index = 0
 
-	include_hidden_columns = cint(include_hidden_columns)
+	excel_row_idx = 0
+
+	include_filters = cint(include_filters)
 	include_indentation = cint(include_indentation)
+	include_hidden_columns = cint(include_hidden_columns)
+	has_total_row = sbool(data.get("add_total_row"))
 
-	if cint(include_filters) and data.filters:
+	if build_styles:
+		metadata = XLSXMetadata(
+			report_name=data.report_name,
+			filters=data.filters,
+			has_total_row=has_total_row,
+			has_indentation=include_indentation,
+		)
+
+	# adding applied filter rows
+	if include_filters and data.applied_filters:
 		filter_data = []
-		for filter_name, filter_value in data.filters.items():
+		for filter_name, filter_value in data.applied_filters.items():
 			if not filter_value:
 				continue
-			filter_value = (
-				", ".join([cstr(x) for x in filter_value])
-				if isinstance(filter_value, list)
-				else cstr(filter_value)
-			)
-			filter_data.append([cstr(filter_name), filter_value])
+
+			applied_filter = [cstr(filter_name), format_filter_value(filter_value)]
+
+			if build_styles:
+				metadata.applied_filters_map[excel_row_idx] = applied_filter
+				excel_row_idx += 1
+
+			filter_data.append(applied_filter)
+
+		# empty row after filters
 		filter_data.append([])
+		excel_row_idx += 1
 		result += filter_data
 
-	# header is after filters + 1 empty row
-	header_index = len(result)
-
-	column_data = []
+	# adding header row
+	column_idx = 0
 	for column in data.columns:
 		if column.get("hidden") and not include_hidden_columns:
 			continue
+
+		if build_styles:
+			metadata.column_map[column_idx] = column
+			column_idx += 1
+
 		column_data.append(_(column.get("label")))
 		column_width = cint(column.get("width", 0))
-		# to convert into scale accepted by openpyxl
+		# to convert into scale accepted by xlsxwriter
 		column_width /= 10
 		column_widths.append(column_width)
+
 	result.append(column_data)
+	excel_row_idx += 1
 
 	# build table from result
+	handle_indentation = include_indentation and not build_styles
 	for row_idx, row in enumerate(data.result):
-		# only pick up rows that are visible in the report
-		if not ignore_visible_idx and row_idx not in visible_idx:
+		# NOTE: for backwards compatibility. remove in v17.
+		if not (ignore_visible_idx or row_idx in visible_idx):
 			continue
 
 		row_data = []
 		row_is_dict = isinstance(row, dict)
+
+		indent = 0
+		if row_is_dict and handle_indentation:
+			indent = row.get("indent") or 0
+			if indent:
+				indent = cint(indent)
+
+		if build_styles:
+			metadata.row_map[excel_row_idx] = row
+			excel_row_idx += 1
 
 		for col_idx, column in enumerate(data.columns):
 			if column.get("hidden") and not include_hidden_columns:
@@ -545,21 +780,49 @@ def build_xlsx_data(
 			if not isinstance(cell_value, EXCEL_TYPES):
 				cell_value = cstr(cell_value)
 
-			if row_is_dict and include_indentation and "indent" in row and col_idx == 0:
-				cell_value = ("    " * cint(row["indent"])) + cstr(cell_value)
+			if handle_indentation and indent and col_idx == 0:
+				cell_value = ("    " * indent) + cstr(cell_value)
 
 			row_data.append(cell_value)
 
 		result.append(row_data)
 
-	return result, column_widths, header_index
+	return result, column_widths, get_xlsx_styles(metadata, data.report_name) if build_styles else None
 
 
-def add_total_row(result, columns, meta=None, is_tree=False, parent_field=None):
+def get_xlsx_styles(metadata: "XLSXMetadata", report_name: str | None = None) -> dict | None:
+	"""
+	Returns styles for XLSX export.
+
+	If report_name is provided, it tries to fetch styles defined in the report's module.
+	"""
+	from frappe.utils.xlsxutils import XLSXStyleBuilder
+
+	styles = None
+	if report_name:
+		report = frappe.get_doc("Report", report_name)
+		styles = report.get_xlsx_styles_from_module(metadata)
+
+	if not styles:
+		styles = XLSXStyleBuilder(metadata).result
+
+	return styles
+
+
+def add_total_row(
+	result,
+	columns,
+	meta=None,
+	is_tree=False,
+	parent_field=None,
+) -> list[dict | list[Any]]:
 	total_row = [""] * len(columns)
 	has_percent = []
 
-	for i, col in enumerate(columns):
+	# all rows are dict or list/tuple, we can check the first row to decide the type
+	is_row_dict = isinstance(result[0], dict) if result else False
+
+	for col_idx, col in enumerate(columns):
 		fieldtype, options, fieldname = None, None, None
 		if isinstance(col, str):
 			if meta:
@@ -583,9 +846,11 @@ def add_total_row(result, columns, meta=None, is_tree=False, parent_field=None):
 			options = col.get("options")
 
 		for row in result:
-			if i >= len(row):
+			# Skip if column index is out of bounds for list/tuple rows
+			if not is_row_dict and col_idx >= len(row):
 				continue
-			cell = row.get(fieldname) if isinstance(row, dict) else row[i]
+
+			cell = row.get(fieldname) if is_row_dict else row[col_idx]
 			if fieldtype is None:
 				if isinstance(cell, int):
 					fieldtype = "Int"
@@ -593,21 +858,21 @@ def add_total_row(result, columns, meta=None, is_tree=False, parent_field=None):
 					fieldtype = "Float"
 			if fieldtype in ["Currency", "Int", "Float", "Percent", "Duration"] and flt(cell):
 				if not (is_tree and row.get(parent_field)):
-					total_row[i] = flt(total_row[i]) + flt(cell)
+					total_row[col_idx] = flt(total_row[col_idx]) + flt(cell)
 
-			if fieldtype == "Percent" and i not in has_percent:
-				has_percent.append(i)
+			if fieldtype == "Percent" and col_idx not in has_percent:
+				has_percent.append(col_idx)
 
 			if fieldtype == "Time" and cell:
-				if not total_row[i]:
-					total_row[i] = timedelta(hours=0, minutes=0, seconds=0)
-				total_row[i] = total_row[i] + cell
+				if not total_row[col_idx]:
+					total_row[col_idx] = timedelta(hours=0, minutes=0, seconds=0)
+				total_row[col_idx] = total_row[col_idx] + cell
 
 		if fieldtype == "Link" and options == "Currency":
-			total_row[i] = result[0].get(fieldname) if isinstance(result[0], dict) else result[0][i]
+			total_row[col_idx] = result[0].get(fieldname) if is_row_dict else result[0][col_idx]
 
-	for i in has_percent:
-		total_row[i] = flt(total_row[i]) / len(result)
+	for col_idx in has_percent:
+		total_row[col_idx] = flt(total_row[col_idx]) / len(result)
 
 	first_col_fieldtype = None
 	if isinstance(columns[0], str):
@@ -617,7 +882,8 @@ def add_total_row(result, columns, meta=None, is_tree=False, parent_field=None):
 	else:
 		first_col_fieldtype = columns[0].get("fieldtype")
 
-	if first_col_fieldtype not in ["Currency", "Int", "Float", "Percent", "Date"]:
+	unsupported_col_types = ("Currency", "Int", "Float", "Percent", "Date", "Datetime", "Time")
+	if first_col_fieldtype not in unsupported_col_types:
 		total_row[0] = _("Total")
 
 	result.append(total_row)
@@ -625,7 +891,7 @@ def add_total_row(result, columns, meta=None, is_tree=False, parent_field=None):
 
 
 @frappe.whitelist()
-def get_data_for_custom_field(doctype, field, names=None):
+def get_data_for_custom_field(doctype: str, field: str, names: str | list[str] | None = None):
 	if not frappe.has_permission(doctype, "read"):
 		frappe.throw(_("Not Permitted to read {0}").format(_(doctype)), frappe.PermissionError)
 
@@ -643,7 +909,7 @@ def get_data_for_custom_report(columns, result):
 
 	for column in columns:
 		if link_field := column.get("link_field"):
-			# backwards compatibile `link_field`
+			# backwards compatible `link_field`
 			# old custom reports which use `str` should not break
 			if isinstance(link_field, str):
 				link_field = frappe._dict({"fieldname": link_field, "names": []})
@@ -658,12 +924,16 @@ def get_data_for_custom_report(columns, result):
 					names.append(row.get(row_key))
 			names = list(set(names))
 
-			doc_field_value_map[(doctype, fieldname)] = get_data_for_custom_field(doctype, fieldname, names)
+			if names:
+				# a fieldname clashing with a report column comes as `fieldname-doctype`
+				doc_field_value_map[(doctype, fieldname)] = get_data_for_custom_field(
+					doctype, fieldname.split("-")[0], names
+				)
 	return doc_field_value_map
 
 
 @frappe.whitelist()
-def save_report(reference_report, report_name, columns, filters):
+def save_report(reference_report: str, report_name: str, columns: str | list, filters: str | list | dict):
 	report_doc = get_report_doc(reference_report)
 
 	docname = frappe.db.exists(
@@ -677,9 +947,9 @@ def save_report(reference_report, report_name, columns, filters):
 
 	if docname:
 		report = frappe.get_doc("Report", docname)
-		existing_jd = json.loads(report.json)
-		existing_jd["columns"] = json.loads(columns)
-		existing_jd["filters"] = json.loads(filters)
+		existing_jd = frappe.parse_json(report.json or "{}")
+		existing_jd["columns"] = frappe.parse_json(columns)
+		existing_jd["filters"] = frappe.parse_json(filters)
 		report.update({"json": json.dumps(existing_jd, separators=(",", ":"))})
 		report.save()
 		frappe.msgprint(_("Report updated successfully"))
@@ -714,7 +984,7 @@ def get_filtered_data(ref_doctype, columns, data, user):
 	if_owner = role_permissions.get("if_owner", {}).get("report")
 
 	if ref_doctype_meta.get_masked_fields():
-		from frappe.model.db_query import mask_field_value
+		from frappe.model.utils.mask import mask_field_value
 
 		# Apply masking to the fields
 		for field in ref_doctype_meta.get_masked_fields():
@@ -971,7 +1241,7 @@ def validate_filters_permissions(report_name, filters=None, user=None, js_filter
 				)
 
 
-def translate_report_data(data, total_row):
+def translate_report_data(data, total_row: bool):
 	for d in data[:-1] if total_row else data:
 		for field, value in d.items():
 			if isinstance(value, str):

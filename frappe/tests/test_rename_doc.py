@@ -10,7 +10,7 @@ from unittest.mock import patch
 import frappe
 from frappe.core.doctype.doctype.test_doctype import new_doctype
 from frappe.exceptions import DoesNotExistError
-from frappe.model.base_document import get_controller
+from frappe.model.document import get_controller
 from frappe.model.rename_doc import bulk_rename, update_document_title
 from frappe.modules.utils import get_doc_path
 from frappe.tests import IntegrationTestCase
@@ -35,6 +35,33 @@ def patch_db(endpoints: list[str] | None = None):
 		for x in patched_endpoints:
 			x.stop()
 		frappe.db.rollback(save_point=savepoint)
+
+
+class TestRenameSingleDocType(IntegrationTestCase):
+	def test_rename_single_document_is_rejected(self):
+		doctype = new_doctype("Test Single Rename Rejected", issingle=1).insert()
+
+		with self.assertRaisesRegex(frappe.ValidationError, "Single DocTypes cannot be renamed"):
+			frappe.rename_doc(doctype.name, doctype.name, f"{doctype.name} New", force=True)
+
+	def test_single_doctype_disables_allow_rename(self):
+		doctype = new_doctype("Test Single Rename Disabled", issingle=1, allow_rename=1).insert()
+
+		self.assertFalse(doctype.allow_rename)
+		self.assertFalse(frappe.db.get_value("DocType", doctype.name, "allow_rename"))
+
+	def test_rename_single_doctype(self):
+		old_name = "Test Single Rename Old"
+		new_name = "Test Single Rename New"
+		new_doctype(old_name, issingle=1).insert()
+		single = frappe.get_single(old_name)
+		single.some_fieldname = "some value"
+		single.save()
+
+		self.assertEqual(new_name, frappe.rename_doc("DocType", old_name, new_name, force=True))
+		self.assertEqual(frappe.db.get_single_value(new_name, "some_fieldname"), "some value")
+		self.assertEqual(frappe.db.get_single_value(new_name, "name"), new_name)
+		self.assertEqual(frappe.db.count("Singles", {"doctype": old_name}), 0)
 
 
 class TestRenameDoc(IntegrationTestCase):
@@ -249,7 +276,7 @@ class TestRenameDoc(IntegrationTestCase):
 		name = choice(self.available_documents)
 		new_name = f"{name}-{frappe.generate_hash(length=4)}"
 		doc = frappe.get_doc(self.test_doctype, name)
-		doc.rename(new_name, merge=frappe.db.exists(self.test_doctype, new_name))
+		doc.rename(new_name, merge=bool(frappe.db.exists(self.test_doctype, new_name)))
 		self.assertEqual(doc.name, new_name)
 		self.available_documents.append(new_name)
 		self.available_documents.remove(name)

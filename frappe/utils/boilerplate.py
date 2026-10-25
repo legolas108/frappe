@@ -147,6 +147,7 @@ def _create_app_boilerplate(dest, hooks, no_git=False):
 	frappe.create_folder(os.path.join(dest, hooks.app_name, hooks.app_name, "config"), with_init=True)
 	frappe.create_folder(os.path.join(dest, hooks.app_name, hooks.app_name, "public", "css"))
 	frappe.create_folder(os.path.join(dest, hooks.app_name, hooks.app_name, "public", "js"))
+	frappe.create_folder(os.path.join(dest, hooks.app_name, hooks.app_name, "patches"), with_init=True)
 
 	# add .gitkeep file so that public folder is committed to git
 	# this is needed because if public doesn't exist, bench build doesn't symlink the apps assets
@@ -356,6 +357,10 @@ build-backend = "flit_core.buildapi"
 [tool.bench.dev-dependencies]
 # package_name = "~=1.1.0"
 
+# These apt dependencies will be installed from Ubuntu repositories when you host your app on Frappe Cloud
+[deploy.dependencies.apt]
+packages = []
+
 [tool.ruff]
 line-length = 110
 target-version = "py314"
@@ -417,9 +422,18 @@ app_license = "{app_license}"
 # 		"logo": "/assets/{app_name}/logo.png",
 # 		"title": "{app_title}",
 # 		"route": "/{app_name}",
-# 		"has_permission": "{app_name}.api.permission.has_app_permission"
+# 		"has_permission": "{app_name}.api.permission.has_app_permission",
 # 	}}
 # ]
+
+# The dock, the rail down the left of the desk, is a document rather than a hook. Author it in
+# Manage Dock on a developer-mode site and press Export to App, and it is written to
+# `{app_name}/dock/{app_name}/{app_name}.json` for git to carry. An app that ships none has no
+# rail: its sidebar gets a switcher in the header instead.
+#
+# A companion app, one that extends a host app rather than standing on its own, says so with
+# `mount_on` on that same record, and its entries are appended to the host's rail. Mounting keeps
+# the companion off the apps screen, so it takes precedence over any add_to_apps_screen above.
 
 # Includes in <head>
 # ------------------
@@ -445,6 +459,7 @@ app_license = "{app_license}"
 # include js in doctype views
 # doctype_js = {{"doctype" : "public/js/doctype.js"}}
 # doctype_list_js = {{"doctype" : "public/js/doctype_list.js"}}
+# doctype_kanban_js = {{"doctype" : "public/js/doctype_kanban.js"}}
 # doctype_tree_js = {{"doctype" : "public/js/doctype_tree.js"}}
 # doctype_calendar_js = {{"doctype" : "public/js/doctype_calendar.js"}}
 
@@ -510,11 +525,28 @@ app_license = "{app_license}"
 # before_app_uninstall = "{app_name}.utils.before_app_uninstall"
 # after_app_uninstall = "{app_name}.utils.after_app_uninstall"
 
+# Build
+# ------------------
+# To hook into the build process
+
+# after_build = "{app_name}.build.after_build"
+
+# To hook into the build process of other apps
+# The list of apps being built is passed as an argument
+
+# after_app_build = "{app_name}.build.after_app_build"
+
 # Desk Notifications
 # ------------------
 # See frappe.core.notifications.get_notification_config
 
 # notification_config = "{app_name}.notifications.get_notification_config"
+
+# Awesome Bar
+# -----------
+# Extra search results: list of dicts with label, description, route, index.
+# route: ["List", "ToDo"], "/desk/docs/some/page", or "https://example.com"
+# awesomebar_search = ["{app_name}.search.awesomebar_results"]
 
 # Permissions
 # -----------

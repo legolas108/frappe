@@ -16,8 +16,10 @@ from werkzeug.routing import Rule
 import frappe
 import frappe.client
 from frappe import _, cint, cstr, get_newargs, is_whitelisted
+from frappe.api import discovery
 from frappe.core.doctype.server_script.server_script_utils import get_server_script_map
 from frappe.handler import is_valid_http_method, run_server_script, upload_file
+from frappe.mcp import handle as handle_mcp
 
 PERMISSION_MAP = {
 	"GET": "read",
@@ -43,7 +45,7 @@ def handle_rpc_call(method: str, doctype: str | None = None):
 	try:
 		method = frappe.get_attr(method)
 	except Exception as e:
-		frappe.throw(_("Failed to get method {0} with {1}").format(method, e))
+		frappe.throw(_("Failed to get method {0} with {1}").format(method, str(e)))
 
 	is_whitelisted(method)
 	is_valid_http_method(method)
@@ -112,7 +114,7 @@ def document_list(doctype: str) -> list[dict[str, Any]]:
 						query = query.where(Project.is_private == 0)
 					return query
 	"""
-	from frappe.model.base_document import get_controller
+	from frappe.model.document import get_controller
 
 	args = frappe.form_dict
 	fields: list | None = frappe.parse_json(args.get("fields", None))
@@ -195,6 +197,7 @@ def update_doc(doctype: str, name: str):
 	data = frappe.form_dict
 
 	doc = frappe.get_doc(doctype, name, for_update=True)
+	doc.check_permission("write")
 	data.pop("flags", None)
 	doc.update(data)
 	doc.save()
@@ -228,9 +231,13 @@ def execute_doc_method(doctype: str, name: str, method: str | None = None):
 	method = method or frappe.form_dict.pop("run_method")
 	doc = frappe.get_doc(doctype, name)
 	doc.is_whitelisted(method)
+	method_obj = getattr(doc, method)
+	fn = getattr(method_obj, "__func__", method_obj)
+	is_valid_http_method(fn)
 
 	doc.check_permission(PERMISSION_MAP[frappe.request.method])
 	result = doc.run_method(method, **frappe.form_dict)
+	doc.apply_fieldlevel_read_permissions()
 	frappe.response.docs.append(doc.as_dict())
 	return result
 
@@ -262,11 +269,28 @@ def run_doc_method(method: str, document: dict[str, Any] | str, kwargs=None):
 
 	new_kwargs = get_newargs(fn, kwargs)
 	response = doc.run_method(method, **new_kwargs)
+	doc.apply_fieldlevel_read_permissions()
 	frappe.response.docs.append(doc)  # send modified document and result both.
 	return response
 
 
 url_rules = [
+	Rule("/mcp", methods=["POST", "GET", "DELETE"], endpoint=handle_mcp),
+	# Discovery APIs
+	Rule("/discovery", methods=["GET"], endpoint=discovery.root),
+	Rule(
+		"/discovery/search",
+		methods=["GET"],
+		endpoint=lambda: discovery.search(frappe.form_dict.get("q")),
+	),
+	Rule("/discovery/method", methods=["GET"], endpoint=discovery.methods),
+	Rule("/discovery/method/<method>", methods=["GET"], endpoint=discovery.method),
+	Rule("/discovery/doctype/<doctype>", methods=["GET"], endpoint=discovery.doctype_methods),
+	Rule(
+		"/discovery/doctype/<doctype>/method/<method>",
+		methods=["GET"],
+		endpoint=discovery.doctype_method,
+	),
 	# RPC calls
 	Rule("/method/login", endpoint=login),
 	Rule("/method/logout", endpoint=logout, methods=["POST"]),

@@ -1,5 +1,6 @@
 # Copyright (c) 2019, Frappe Technologies and contributors
 # License: MIT. See LICENSE
+from unittest.mock import patch
 from urllib.parse import urljoin
 
 import requests
@@ -8,6 +9,7 @@ import frappe
 from frappe.integrations.doctype.social_login_key.test_social_login_key import (
 	create_or_update_social_login_key,
 )
+from frappe.integrations.doctype.token_cache.token_cache import TokenCache
 from frappe.tests import IntegrationTestCase
 
 
@@ -92,18 +94,14 @@ class TestConnectedApp(IntegrationTestCase):
 		self.connected_app.reload()
 		self.oauth_client.reload()
 
-	def test_web_application_flow(self):
-		"""Simulate a logged in user who opens the authorization URL."""
-
-		def login():
-			return session.get(
-				urljoin(self.base_url, "/api/method/login"),
-				params={"usr": self.user_name, "pwd": self.user_password},
-			)
-
+	def complete_web_application_flow(self):
+		"""Simulate a logged in user who opens the authorization URL and store the token."""
 		session = requests.Session()
 
-		first_login = login()
+		first_login = session.get(
+			urljoin(self.base_url, "/api/method/login"),
+			params={"usr": self.user_name, "pwd": self.user_password},
+		)
 		self.assertEqual(first_login.status_code, 200)
 
 		authorization_url = self.connected_app.initiate_web_application_flow(user=self.user_name)
@@ -115,12 +113,90 @@ class TestConnectedApp(IntegrationTestCase):
 		self.assertEqual(callback_response.status_code, 200)
 
 		self.token_cache = self.connected_app.get_token_cache(self.user_name)
+		return session
+
+	def test_web_application_flow(self):
+		"""Simulate a logged in user who opens the authorization URL."""
+		self.complete_web_application_flow()
+
 		token = self.token_cache.get_password("access_token")
 		self.assertNotEqual(token, None)
 
 		oauth2_session = self.connected_app.get_oauth2_session(self.user_name)
 		resp = oauth2_session.get(urljoin(self.base_url, "/api/method/frappe.auth.get_logged_user"))
 		self.assertEqual(resp.json().get("message"), self.user_name)
+
+	def test_concurrent_refresh_skips_redundant_call(self):
+		"""A refresh must be skipped if another worker already refreshed the token."""
+		self.complete_web_application_flow()
+
+		self.token_cache.db_set("expires_in", -1)
+
+		# Stand in for a concurrent worker that refreshed first: the reload under the lock
+		# returns a token that is no longer expired.
+		original_reload = TokenCache.reload
+
+		def reload_as_fresh(token_cache, *args, **kwargs):
+			original_reload(token_cache, *args, **kwargs)
+			token_cache.expires_in = 3600
+			return token_cache
+
+		with (
+			patch.object(
+				self.connected_app, "get_oauth2_session", wraps=self.connected_app.get_oauth2_session
+			) as session_spy,
+			patch.object(TokenCache, "reload", reload_as_fresh),
+		):
+			self.connected_app.get_active_token(self.user_name)
+
+		session_spy.assert_not_called()
+
+	def test_get_openid_configuration_requires_write(self):
+		"""A caller must not be able to invoke get_openid_configuration on a
+		Connected App -- real or client-forged via run_doc_method -- without
+		write access to it, since the method fetches a field-supplied URL."""
+		from frappe.handler import run_doc_method
+
+		reader = frappe.get_doc(
+			{
+				"doctype": "User",
+				"email": f"{frappe.generate_hash()}@example.com",
+				"first_name": "Reader",
+				"send_welcome_email": 0,
+				"roles": [{"role": "All"}],
+			}
+		).insert(ignore_permissions=True)
+		self.addCleanup(lambda: frappe.delete_doc("User", reader.name, force=True, ignore_permissions=True))
+
+		previous_request = getattr(frappe.local, "request", None)
+
+		def restore_request():
+			if previous_request is None:
+				delattr(frappe.local, "request")
+			else:
+				frappe.local.request = previous_request
+
+		self.addCleanup(restore_request)
+		frappe.local.request = frappe._dict(method="GET")
+		docs = {
+			"doctype": "Connected App",
+			"name": self.connected_app.name,
+			"modified": str(self.connected_app.modified),
+		}
+
+		try:
+			frappe.set_user(reader.name)
+			self.assertTrue(frappe.has_permission("Connected App", "read"))
+			self.assertFalse(frappe.has_permission("Connected App", "write"))
+			self.assertRaises(frappe.PermissionError, run_doc_method, "get_openid_configuration", docs=docs)
+
+			# The __islocal trick must not downgrade this to a weaker check either.
+			forged_new = dict(docs, __islocal=1, openid_configuration="http://example.com")
+			self.assertRaises(
+				frappe.PermissionError, run_doc_method, "get_openid_configuration", docs=forged_new
+			)
+		finally:
+			frappe.set_user("Administrator")
 
 	def tearDown(self):
 		def delete_if_exists(attribute):

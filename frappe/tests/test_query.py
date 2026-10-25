@@ -167,6 +167,7 @@ class TestQuery(IntegrationTestCase):
 			"*",
 			"`tabHas Role`.`name`",
 			"field as `alias with space`",
+			"frappé",  # unicode field names should be valid
 		]
 
 		invalid_fields = [
@@ -370,10 +371,10 @@ class TestQuery(IntegrationTestCase):
 				fields=["name"],
 				filters={"module.app_name": "frappe"},
 			).get_sql(),
-			"SELECT `tabDocType`.`name` FROM `tabDocType` LEFT JOIN `tabModule Def` ON `tabModule Def`.`name`=`tabDocType`.`module` WHERE `tabModule Def`.`app_name`='frappe'",
+			"SELECT `tabDocType`.`name` FROM `tabDocType` LEFT JOIN `tabModule Def` `tab_Module Def_1` ON `tab_Module Def_1`.`name`=`tabDocType`.`module` WHERE `tab_Module Def_1`.`app_name`='frappe'",
 		)
 
-		query = "SELECT `tabDocType`.`name` FROM `tabDocType` LEFT JOIN `tabModule Def` ON `tabModule Def`.`name`=`tabDocType`.`module` WHERE `tabModule Def`.`app_name` LIKE 'frap%'"
+		query = "SELECT `tabDocType`.`name` FROM `tabDocType` LEFT JOIN `tabModule Def` `tab_Module Def_1` ON `tab_Module Def_1`.`name`=`tabDocType`.`module` WHERE `tab_Module Def_1`.`app_name` LIKE 'frap%'"
 		query = query.replace("LIKE", "ILIKE" if frappe.db.db_type == "postgres" else "LIKE")
 		self.assertQueryEqual(
 			frappe.qb.get_query(
@@ -415,7 +416,7 @@ class TestQuery(IntegrationTestCase):
 				"DocType",
 				filters={"name": ("in", [])},
 			).get_sql(),
-			"SELECT `name` FROM `tabDocType` WHERE `name` IN ('')",
+			"SELECT `name` FROM `tabDocType` WHERE `name` IN ('') OR `name` IS NULL",
 		)
 
 		self.assertQueryEqual(
@@ -745,7 +746,7 @@ class TestQuery(IntegrationTestCase):
 				"DocType",
 				fields=["name", "module.app_name as app_name"],
 			).get_sql(),
-			"SELECT `tabDocType`.`name`,`tabModule Def`.`app_name` `app_name` FROM `tabDocType` LEFT JOIN `tabModule Def` ON `tabModule Def`.`name`=`tabDocType`.`module`",
+			"SELECT `tabDocType`.`name`,`tab_Module Def_1`.`app_name` `app_name` FROM `tabDocType` LEFT JOIN `tabModule Def` `tab_Module Def_1` ON `tab_Module Def_1`.`name`=`tabDocType`.`module`",
 		)
 
 	# fields now has strict validation, so this test is not valid anymore
@@ -769,6 +770,15 @@ class TestQuery(IntegrationTestCase):
 		# Format decendants result
 		descendants_result = list(itertools.chain.from_iterable(descendants_result))
 		self.assertListEqual(descendants_result, get_descendants_of("Test Tree DocType", "Parent 1"))
+		self.assertListEqual(
+			frappe.get_all(
+				"Test Tree DocType",
+				filters={"name": ("Descendants Of", "Parent 1")},
+				order_by="creation desc",
+				pluck="name",
+			),
+			get_descendants_of("Test Tree DocType", "Parent 1"),
+		)
 
 		ancestors_result = frappe.qb.get_query(
 			"Test Tree DocType",
@@ -815,6 +825,82 @@ class TestQuery(IntegrationTestCase):
 
 		frappe.db.sql("delete from `tabDocType` where `name` = 'Test Tree DocType'")
 		frappe.db.sql_ddl("drop table if exists `tabTest Tree DocType`")
+
+	def test_nestedset_on_child_table_field(self):
+		"""Nested-set operator on a child-table link field should resolve the field
+		against the child doctype, not the parent (issue #38776)."""
+		tree_dt = child_dt = parent_dt = None
+		try:
+			tree_dt = new_doctype(is_tree=True, autoname="field:some_fieldname").insert()
+			parent_field = "parent_" + tree_dt.name.lower().replace(" ", "_")
+
+			for record in [
+				{"some_fieldname": "Root Node", parent_field: None, "is_group": 1},
+				{"some_fieldname": "Parent 1", parent_field: "Root Node", "is_group": 1},
+				{"some_fieldname": "Parent 2", parent_field: "Root Node", "is_group": 1},
+				{"some_fieldname": "Child 1", parent_field: "Parent 1", "is_group": 0},
+				{"some_fieldname": "Child 2", parent_field: "Parent 1", "is_group": 0},
+				{"some_fieldname": "Child 3", parent_field: "Parent 2", "is_group": 0},
+			]:
+				d = frappe.new_doc(tree_dt.name)
+				d.update(record)
+				d.insert()
+
+			child_dt = new_doctype(
+				istable=1,
+				fields=[
+					{
+						"fieldname": "tree_link",
+						"fieldtype": "Link",
+						"options": tree_dt.name,
+						"label": "Tree Link",
+					}
+				],
+			).insert()
+			parent_dt = new_doctype(
+				fields=[
+					{
+						"fieldname": "rows",
+						"fieldtype": "Table",
+						"options": child_dt.name,
+						"label": "Rows",
+					}
+				],
+			).insert()
+
+			p1 = frappe.get_doc(
+				doctype=parent_dt.name,
+				rows=[{"tree_link": "Child 1"}, {"tree_link": "Child 2"}],
+			).insert()
+			p2 = frappe.get_doc(
+				doctype=parent_dt.name,
+				rows=[{"tree_link": "Child 3"}],
+			).insert()
+
+			# Before the fix, the field was looked up on the parent doctype meta
+			# and ref_doctype fell back to the parent — producing
+			# "Unknown column 'lft'" against the parent table.
+			result = frappe.get_all(
+				parent_dt.name,
+				filters=[[child_dt.name, "tree_link", "descendants of", "Parent 1"]],
+				pluck="name",
+			)
+			self.assertIn(p1.name, result)
+			self.assertNotIn(p2.name, result)
+
+			# Also exercise the qb path directly.
+			rows = frappe.qb.get_query(
+				parent_dt.name,
+				fields=["name"],
+				filters=[[child_dt.name, "tree_link", "descendants of", "Parent 1"]],
+			).run(as_dict=1)
+			names = {r.name for r in rows}
+			self.assertIn(p1.name, names)
+			self.assertNotIn(p2.name, names)
+		finally:
+			for dt in filter(None, [parent_dt, child_dt, tree_dt]):
+				frappe.db.sql("delete from `tabDocType` where `name` = %s", dt.name)
+				frappe.db.sql_ddl(f"drop table if exists `tab{dt.name}`")
 
 	def test_child_field_syntax(self):
 		note1 = frappe.get_doc(doctype="Note", title="Note 1", seen_by=[{"user": "Administrator"}]).insert()
@@ -981,6 +1067,140 @@ class TestQuery(IntegrationTestCase):
 		test_user.remove_roles(test_role)
 		frappe.delete_doc("Role", test_role, force=True)
 
+	def test_filter_with_select_permission_allows_permlevel_0_fields(self):
+		"""Test that users with only select permission can filter by all permlevel 0 fields."""
+
+		test_role = "SelectFilterTestRole"
+		test_user_email = "test2@example.com"
+		test_note_title = "Select Filter Test Note"
+
+		# Cleanup previous runs
+		frappe.set_user("Administrator")
+		test_user = frappe.get_doc("User", test_user_email)
+		test_user.remove_roles(test_role)
+		frappe.delete_doc("Role", test_role, ignore_missing=True, force=True)
+		frappe.delete_doc("Note", {"title": test_note_title}, ignore_missing=True, force=True)
+
+		# Setup Role with only 'select' on Note (no read)
+		frappe.get_doc({"doctype": "Role", "role_name": test_role}).insert(ignore_if_duplicate=True)
+		add_permission("Note", test_role, 0, ptype="select")
+		update_permission_property("Note", test_role, 0, "read", 0, validate=False)
+		test_user.add_roles(test_role)
+
+		# Create a test note with specific content
+		note = frappe.get_doc(
+			doctype="Note", title=test_note_title, content="Specific Content", public=1
+		).insert(ignore_permissions=True)
+
+		# Register cleanups in reverse order (LIFO) - Administrator restore must happen first
+		def cleanup():
+			frappe.set_user("Administrator")
+			frappe.delete_doc("Note", note.name, ignore_missing=True, force=True)
+			test_user.remove_roles(test_role)
+			frappe.delete_doc("Role", test_role, ignore_missing=True, force=True)
+
+		self.addCleanup(cleanup)
+
+		frappe.set_user(test_user_email)
+
+		# 'content' is a permlevel 0 field but NOT a search field
+		result = frappe.qb.get_query(
+			"Note",
+			filters={"content": "Specific Content"},
+			fields=["name"],  # Only select 'name' which is allowed
+			ignore_permissions=False,
+		).run(as_dict=True)
+		self.assertEqual(len(result), 1, "Should find the note when filtering by permlevel 0 field")
+		self.assertEqual(result[0]["name"], note.name)
+
+	def test_core_doctype_filterable_fields_with_select_permission(self):
+		"""Core doctypes like User should allow filtering by any field when the user
+		only has select permission. Regression test for #37923."""
+		test_role = "CoreSelectTestRole"
+		test_user_email = "test2@example.com"
+
+		frappe.set_user("Administrator")
+		test_user = frappe.get_doc("User", test_user_email)
+		test_user.remove_roles(test_role)
+		frappe.delete_doc("Role", test_role, ignore_missing=True, force=True)
+
+		frappe.get_doc({"doctype": "Role", "role_name": test_role}).insert(ignore_if_duplicate=True)
+		add_permission("User", test_role, 0, ptype="select")
+		update_permission_property("User", test_role, 0, "read", 0, validate=False)
+		test_user.add_roles(test_role)
+
+		def cleanup():
+			frappe.set_user("Administrator")
+			test_user.remove_roles(test_role)
+			frappe.delete_doc("Role", test_role, ignore_missing=True, force=True)
+
+		self.addCleanup(cleanup)
+
+		frappe.set_user(test_user_email)
+
+		# filter by user_type and enabled — the exact filters used by search_link for assignment
+		result = frappe.qb.get_query(
+			"User",
+			filters={"user_type": "System User", "enabled": 1},
+			fields=["name"],
+			ignore_permissions=False,
+		).run(as_dict=True)
+		self.assertTrue(len(result) > 0, "Should be able to filter User by user_type and enabled")
+
+	def test_core_doctype_filterable_fields_with_read_and_select_permission(self):
+		"""Read+select on User should still allow filtering by user_type."""
+		test_role = "CoreReadSelectTestRole"
+		test_user_email = "test2@example.com"
+
+		frappe.set_user("Administrator")
+		test_user = frappe.get_doc("User", test_user_email)
+		test_user.remove_roles(test_role)
+		frappe.delete_doc("Role", test_role, ignore_missing=True, force=True)
+
+		frappe.get_doc({"doctype": "Role", "role_name": test_role}).insert(ignore_if_duplicate=True)
+		# read defaults to 1 on a new Custom DocPerm row — leave it on, unlike the
+		# select-only test above, so both read and select are granted at once.
+		add_permission("User", test_role, 0, ptype="select")
+		test_user.add_roles(test_role)
+
+		def cleanup():
+			frappe.set_user("Administrator")
+			test_user.remove_roles(test_role)
+			frappe.delete_doc("Role", test_role, ignore_missing=True, force=True)
+
+		self.addCleanup(cleanup)
+
+		frappe.set_user(test_user_email)
+
+		self.assertFalse(
+			frappe.only_has_select_perm("User"),
+			"Sanity check: user should have read as well as select, not select-only",
+		)
+
+		# filter by user_type and enabled — the exact filters used by search_link for assignment
+		result = frappe.qb.get_query(
+			"User",
+			filters={"user_type": "System User", "enabled": 1},
+			fields=["name"],
+			ignore_permissions=False,
+		).run(as_dict=True)
+		self.assertTrue(
+			len(result) > 0,
+			"Should be able to filter User by user_type and enabled with read+select permission",
+		)
+
+		# the exemption is filter-only - explicitly requesting user_type as an output
+		# field should not return its value (field-level read permission drops it silently)
+		qb_result = frappe.qb.get_query("User", fields=["name", "user_type"], ignore_permissions=False).run(
+			as_dict=True
+		)
+		self.assertTrue(qb_result)
+		self.assertNotIn("user_type", qb_result[0])
+
+		list_result = frappe.get_list("User", fields=["name", "user_type"], limit=3)
+		self.assertTrue(list_result)
+		self.assertNotIn("user_type", list_result[0])
+
 	def test_nested_permission(self):
 		"""Test permission on nested doctypes"""
 		frappe.set_user("Administrator")
@@ -1030,6 +1250,39 @@ class TestQuery(IntegrationTestCase):
 
 		result = frappe.qb.get_query("DocType", filters={"autoname": ["is", "set"]}).run(as_dict=1)
 		self.assertFalse(any(d.name == "Property Setter" for d in result))
+
+	def test_is_set_is_not_set_on_non_text_fields(self):
+		values = {
+			"Int": 1,
+			"Float": 1.5,
+			"Check": 1,
+			"Rating": 0.6,
+			"Duration": 3600,
+			"Date": "2026-09-29",
+			"Datetime": "2026-09-29 10:00:00",
+			"Time": "10:00:00",
+		}
+		fieldnames = {fieldtype: f"{frappe.scrub(fieldtype)}_field" for fieldtype in values}
+		doctype = new_doctype(
+			fields=[{"fieldname": fieldnames[fieldtype], "fieldtype": fieldtype} for fieldtype in values]
+		).insert()
+		filled = frappe.get_doc(
+			{"doctype": doctype.name, **{fieldnames[fieldtype]: value for fieldtype, value in values.items()}}
+		).insert()
+		empty = frappe.get_doc({"doctype": doctype.name}).insert()
+
+		for fieldname in fieldnames.values():
+			for value, expected in (("set", filled.name), ("not set", empty.name)):
+				with self.subTest(fieldname=fieldname, value=value):
+					query = frappe.qb.get_query(doctype.name, filters={fieldname: ["is", value]})
+					self.assertEqual(query.run(pluck="name"), [expected])
+
+		self.assertFalse(frappe.qb.get_query(doctype.name, filters={"docstatus": ["is", "set"]}).run())
+		self.assertFalse(frappe.qb.get_query(doctype.name, filters={"modified": ["is", "not set"]}).run())
+
+		qualified_date = f"`tab{doctype.name}`.`{fieldnames['Date']}`"
+		query = frappe.qb.get_query(doctype.name, filters={qualified_date: ["is", "set"]})
+		self.assertEqual(query.run(pluck="name"), [filled.name])
 
 	def test_permission_query_condition(self):
 		"""Test permission query condition being applied from hooks and server script"""
@@ -1181,6 +1434,235 @@ class TestQuery(IntegrationTestCase):
 		target_dt.delete()
 		test_user_doc.remove_roles(test_role)
 		frappe.delete_doc("Role", test_role, force=True)
+
+	def test_link_table_field_optional_link_not_filtered_by_target_permission_conditions(self):
+		"""An optional (empty) Link field fetched via dot-notation must not cause the
+		parent row to disappear because of the *target* doctype's permission_query_conditions.
+
+		LinkTableField.apply_join LEFT JOINs the linked doctype and applies the target's
+		permission_query_conditions as a WHERE clause. When the link value is empty, the
+		joined row is entirely NULL, so any non-trivial condition on it evaluates false and
+		silently drops the parent row -- even though the parent row never referenced
+		anything the user isn't allowed to see. The condition belongs in the JOIN's ON
+		clause, where it only ever affects what gets attached, never whether the parent
+		row survives.
+		"""
+		target_dt_name = "TargetDocForOptionalLink"
+		source_dt_name = "SourceDocForOptionalLink"
+		test_role = "OptionalLinkPermTestRole"
+		test_user = "test3@example.com"
+
+		# Cleanup previous runs
+		frappe.set_user("Administrator")
+		frappe.delete_doc("DocType", source_dt_name, ignore_missing=True, force=True)
+		frappe.delete_doc("DocType", target_dt_name, ignore_missing=True, force=True)
+		frappe.delete_doc("Role", test_role, ignore_missing=True, force=True)
+		test_user_doc = frappe.get_doc("User", test_user)
+		test_user_doc.remove_roles(test_role)
+
+		# Create Doctypes: source has an OPTIONAL link to target
+		target_dt = new_doctype(
+			target_dt_name,
+			fields=[{"fieldname": "value", "fieldtype": "Data", "label": "Value"}],
+		).insert(ignore_if_duplicate=True)
+
+		source_dt = new_doctype(
+			source_dt_name,
+			fields=[
+				{
+					"fieldname": "link_field",
+					"fieldtype": "Link",
+					"options": target_dt_name,
+					"label": "Link Field",
+					"reqd": 0,
+				}
+			],
+		).insert(ignore_if_duplicate=True)
+
+		# Setup Role and Permissions
+		frappe.get_doc({"doctype": "Role", "role_name": test_role}).insert(ignore_if_duplicate=True)
+		add_permission(source_dt_name, test_role, 0, ptype="read")
+		add_permission(target_dt_name, test_role, 0, ptype="read")
+		test_user_doc.add_roles(test_role)
+
+		# Create records: one source doc points at a target, the other has no link at all
+		target_doc = frappe.get_doc(doctype=target_dt_name, value="Secret Data").insert(
+			ignore_permissions=True
+		)
+		linked_source = frappe.get_doc(doctype=source_dt_name, link_field=target_doc.name).insert(
+			ignore_permissions=True
+		)
+		unlinked_source = frappe.get_doc(doctype=source_dt_name).insert(ignore_permissions=True)
+
+		# Target doctype's permission_query_conditions denies every row for every user,
+		# simulating "the user can't see the specific document this field would point to".
+		with self.patch_hooks(
+			{
+				"permission_query_conditions": {
+					target_dt_name: ["frappe.tests.test_query.test_deny_all_permission_hook"]
+				}
+			}
+		):
+			# Registered before switching so an assertion failure can't leak the user
+			# (and the roles granting it access) into subsequent tests.
+			self.addCleanup(lambda: frappe.set_user("Administrator"))
+			frappe.set_user(test_user)
+			result = frappe.qb.get_query(
+				source_dt_name,
+				filters={"name": ["in", [linked_source.name, unlinked_source.name]]},
+				fields=["name", "link_field.value as linked_value"],
+				ignore_permissions=False,
+			).run(as_dict=True)
+
+			by_name = {d.name: d for d in result}
+			self.assertIn(
+				unlinked_source.name,
+				by_name,
+				"A row with no link at all must not be filtered out by an unrelated "
+				"doctype's permission condition.",
+			)
+			self.assertIsNone(by_name[unlinked_source.name].linked_value)
+
+			# The row that *does* link to an inaccessible target should still be visible
+			# (its own permissions are unaffected) but must not leak the target's data.
+			self.assertIn(linked_source.name, by_name)
+			self.assertIsNone(by_name[linked_source.name].linked_value)
+
+		# Cleanup
+		frappe.set_user("Administrator")
+		linked_source.delete(ignore_permissions=True)
+		unlinked_source.delete(ignore_permissions=True)
+		target_doc.delete(ignore_permissions=True)
+		source_dt.delete()
+		target_dt.delete()
+		test_user_doc.remove_roles(test_role)
+		frappe.delete_doc("Role", test_role, force=True)
+
+	def test_multiple_link_fields_to_same_target_fetch_distinct_titles(self):
+		"""Two Link fields on the same doctype pointing at the same target must each
+		fetch their value from their own joined row. Without a per-field join alias the
+		second field silently reuses the first field's join and shows the wrong value.
+		"""
+		target_dt_name = "TargetDocForDualLink"
+		source_dt_name = "SourceDocForDualLink"
+
+		frappe.set_user("Administrator")
+		frappe.delete_doc("DocType", source_dt_name, ignore_missing=True, force=True)
+		frappe.delete_doc("DocType", target_dt_name, ignore_missing=True, force=True)
+
+		target_dt = new_doctype(
+			target_dt_name,
+			fields=[{"fieldname": "value", "fieldtype": "Data", "label": "Value"}],
+		).insert(ignore_if_duplicate=True)
+		source_dt = new_doctype(
+			source_dt_name,
+			fields=[
+				{"fieldname": "origin", "fieldtype": "Link", "options": target_dt_name, "label": "Origin"},
+				{
+					"fieldname": "destination",
+					"fieldtype": "Link",
+					"options": target_dt_name,
+					"label": "Destination",
+				},
+			],
+		).insert(ignore_if_duplicate=True)
+
+		origin_doc = frappe.get_doc(doctype=target_dt_name, value="Origin Value").insert(
+			ignore_permissions=True
+		)
+		destination_doc = frappe.get_doc(doctype=target_dt_name, value="Destination Value").insert(
+			ignore_permissions=True
+		)
+		source_doc = frappe.get_doc(
+			doctype=source_dt_name, origin=origin_doc.name, destination=destination_doc.name
+		).insert(ignore_permissions=True)
+
+		result = frappe.qb.get_query(
+			source_dt_name,
+			filters={"name": source_doc.name},
+			fields=["name", "origin.value as origin_value", "destination.value as destination_value"],
+			ignore_permissions=True,
+		).run(as_dict=True)
+
+		self.assertEqual(len(result), 1)
+		self.assertEqual(result[0].origin_value, "Origin Value")
+		self.assertEqual(result[0].destination_value, "Destination Value")
+
+		# Cleanup
+		source_doc.delete(ignore_permissions=True)
+		origin_doc.delete(ignore_permissions=True)
+		destination_doc.delete(ignore_permissions=True)
+		source_dt.delete()
+		target_dt.delete()
+
+	def test_link_field_permission_hook_referencing_target_table(self):
+		"""A target doctype's permission_query_conditions hook may return a raw SQL
+		string that references its own `tabDoctype`. When the target is joined under an
+		alias (link field fetched via dot-notation), that table isn't in scope, so the
+		condition must still apply to the aliased join.
+		"""
+		target_dt_name = "TargetDocForHookAlias"
+		source_dt_name = "SourceDocForHookAlias"
+
+		frappe.set_user("Administrator")
+		frappe.delete_doc("DocType", source_dt_name, ignore_missing=True, force=True)
+		frappe.delete_doc("DocType", target_dt_name, ignore_missing=True, force=True)
+
+		target_dt = new_doctype(
+			target_dt_name,
+			fields=[{"fieldname": "value", "fieldtype": "Data", "label": "Value"}],
+		).insert(ignore_if_duplicate=True)
+		source_dt = new_doctype(
+			source_dt_name,
+			fields=[
+				{
+					"fieldname": "link_field",
+					"fieldtype": "Link",
+					"options": target_dt_name,
+					"label": "Link Field",
+				}
+			],
+		).insert(ignore_if_duplicate=True)
+
+		allowed_value = f"Allowed tab{target_dt_name} batch"
+		allowed = frappe.get_doc(doctype=target_dt_name, value=allowed_value).insert(ignore_permissions=True)
+		denied = frappe.get_doc(doctype=target_dt_name, value="Denied").insert(ignore_permissions=True)
+		src_allowed = frappe.get_doc(doctype=source_dt_name, link_field=allowed.name).insert(
+			ignore_permissions=True
+		)
+		src_denied = frappe.get_doc(doctype=source_dt_name, link_field=denied.name).insert(
+			ignore_permissions=True
+		)
+
+		with self.patch_hooks(
+			{
+				"permission_query_conditions": {
+					target_dt_name: ["frappe.tests.test_query.allow_named_target_hook"]
+				}
+			}
+		):
+			result = frappe.qb.get_query(
+				source_dt_name,
+				filters={"name": ["in", [src_allowed.name, src_denied.name]]},
+				fields=["name", "link_field.value as linked_value"],
+				ignore_permissions=False,
+			).run(as_dict=True)
+
+		by_name = {d.name: d for d in result}
+		# The hook lives in the JOIN's ON clause, so both parent rows survive; it only
+		# governs which linked row attaches.
+		self.assertIn(src_allowed.name, by_name)
+		self.assertIn(src_denied.name, by_name)
+		self.assertEqual(by_name[src_allowed.name].linked_value, allowed_value)
+		self.assertIsNone(by_name[src_denied.name].linked_value)
+
+		# Cleanup
+		src_allowed.delete(ignore_permissions=True)
+		src_denied.delete(ignore_permissions=True)
+		allowed.delete(ignore_permissions=True)
+		denied.delete(ignore_permissions=True)
+		source_dt.delete()
+		target_dt.delete()
 
 	def test_filter_direct_field_permission(self):
 		"""Test that filtering is only allowed on permitted direct fields."""
@@ -1673,6 +2155,14 @@ class TestQuery(IntegrationTestCase):
 		)
 		sql = query.get_sql()
 		self.assertIn(self.normalize_sql("MAX(`creation`) `latest_user`"), sql)
+
+		# Test YEAR function
+		query = frappe.qb.get_query(
+			"User", fields=[{"YEAR": "creation", "as": "creation_year"}], group_by="creation_year"
+		)
+		sql = query.get_sql()
+		self.assertIn(self.normalize_sql("YEAR(`creation`) `creation_year`"), sql)
+		self.assertIn(self.normalize_sql("GROUP BY `creation_year`"), self.normalize_sql(sql))
 
 		# Test MIN function
 		query = frappe.qb.get_query(
@@ -2298,7 +2788,227 @@ class TestQuery(IntegrationTestCase):
 		self.assertEqual(engine._get_ifnull_fallback("Patch Log", "skipped"), "0")
 		self.assertEqual(engine._get_ifnull_fallback("Patch Log", "patch"), "''")
 
+	@run_only_if(db_type_is.MARIADB)
+	def test_drop_unique_constraint_for_deleted_fields_mariadb(self):
+		trial_dt = new_doctype(
+			"Trial Doctype",
+			fields=[
+				{
+					"fieldname": "field_one",
+					"fieldtype": "Data",
+					"label": "Field One",
+				},
+				{
+					"fieldname": "field_two",
+					"fieldtype": "Data",
+					"label": "Field Two",
+					"unique": 1,
+				},
+			],
+		)
+
+		trial_dt.insert(ignore_if_duplicate=True)
+
+		indexes = frappe.db.get_column_index("tabTrial Doctype", "field_two", unique=True)
+		self.assertTrue(indexes)
+
+		field_to_remove = None
+
+		for field in trial_dt.fields:
+			if field.fieldname == "field_two":
+				field_to_remove = field
+				break
+
+		trial_dt.fields.remove(field_to_remove)
+		trial_dt.save()
+
+		indexes = frappe.db.get_column_index("tabTrial Doctype", "field_two", unique=True)
+		self.assertFalse(indexes)
+
+	@run_only_if(db_type_is.POSTGRES)
+	def test_drop_unique_constraint_and_indexes_for_deleted_fields_postgres(self):
+		# test for unique index backed by constraint at field creation time
+		trial_dt = new_doctype(
+			"Trial Doctype",
+			fields=[
+				{
+					"fieldname": "field_one",
+					"fieldtype": "Data",
+					"label": "Field One",
+				},
+				{
+					"fieldname": "field_two",
+					"fieldtype": "Data",
+					"label": "Field Two",
+					"unique": 1,
+				},
+			],
+		)
+
+		trial_dt.insert(ignore_if_duplicate=True)
+
+		index_exists = frappe.db.sql(
+			"""
+			SELECT 1
+			FROM pg_indexes
+			WHERE tablename = %s
+			AND indexname = %s
+			""",
+			(
+				f"tab{trial_dt.name}",
+				f"tab{trial_dt.name}_field_two_key",
+			),
+		)
+		self.assertTrue(index_exists)
+
+		field_to_remove = None
+
+		for field in trial_dt.fields:
+			if field.fieldname == "field_two":
+				field_to_remove = field
+				break
+
+		trial_dt.fields.remove(field_to_remove)
+		trial_dt.save()
+
+		index_exists = frappe.db.sql(
+			"""
+			SELECT 1
+			FROM pg_indexes
+			WHERE tablename = %s
+			AND indexname = %s
+			""",
+			(
+				f"tab{trial_dt.name}",
+				f"tab{trial_dt.name}_field_two_key",
+			),
+		)
+		self.assertFalse(index_exists)
+
+		# test for unique index backed by no constraint created at field alteration post creation
+		for field in trial_dt.fields:
+			if field.fieldname == "field_one":
+				field.unique = 1
+
+		trial_dt.save()
+
+		index_exists = frappe.db.sql(
+			"""
+			SELECT 1
+			FROM pg_indexes
+			WHERE tablename = %s
+			AND indexname = %s
+			""",
+			(
+				f"tab{trial_dt.name}",
+				"unique_field_one",
+			),
+		)
+		self.assertTrue(index_exists)
+
+		field_to_remove = None
+
+		for field in trial_dt.fields:
+			if field.fieldname == "field_one":
+				field_to_remove = field
+				break
+
+		trial_dt.fields.remove(field_to_remove)
+		trial_dt.save()
+
+		index_exists = frappe.db.sql(
+			"""
+			SELECT 1
+			FROM pg_indexes
+			WHERE tablename = %s
+			AND indexname = %s
+			""",
+			(
+				f"tab{trial_dt.name}",
+				"unique_field_one",
+			),
+		)
+		self.assertFalse(index_exists)
+
+	def test_limit_offset_query(self):
+		"""Test if query builder correctly uses limit with offset in MariaDB and SQLite when limit is omitted."""
+		from frappe.database.query import MAX_LIMIT
+
+		query = frappe.qb.get_query("Doctype", offset=10).get_sql()
+		if frappe.db.db_type != "postgres":
+			self.assertIn(f"LIMIT {MAX_LIMIT} OFFSET 10", query)
+			query = frappe.qb.get_query("Doctype", limit=10, offset=10).get_sql()
+			self.assertIn("LIMIT 10 OFFSET 10", query)
+		else:
+			self.assertNotIn("LIMIT", query)
+			self.assertIn("OFFSET 10", query)
+
+	@run_only_if(db_type_is.MARIADB)
+	def test_build_filter_conditions_escapes_backslash_safely(self):
+		"""A filter value ending in a backslash must not let its string literal
+		swallow the next condition as live SQL.
+
+		Engine.build_filter_conditions renders filter values via pypika, which
+		only doubles quote characters, not backslashes. On MariaDB's default
+		sql_mode a trailing backslash escapes the closing quote, so two chained
+		filters on the same field could splice arbitrary SQL into the
+		surrounding WHERE clause.
+		"""
+		from frappe.database.query import Engine
+
+		bs = chr(92)  # a single backslash
+		tail = " or sleep(0) -- "
+
+		engine = Engine()
+		engine.get_query("DocType", db_query_compat=True)
+		conditions = []
+		engine.build_filter_conditions(
+			[
+				["DocType", "name", "=", bs],
+				["DocType", "name", "=", tail],
+			],
+			conditions,
+		)
+		cond = " and ".join(conditions)
+
+		# The backslash must be doubled so it stays inside its own literal
+		# instead of escaping the closing quote and exposing `tail` as code.
+		self.assertIn(f"'{bs * 2}'", cond)
+		self.assertIn(f"='{tail}'", cond)
+
+		# The fragment must still be syntactically valid, harmless SQL.
+		frappe.db.sql(f"SELECT name FROM `tabDocType` WHERE 1=1 and {cond} LIMIT 0")
+
+	@run_only_if(db_type_is.MARIADB)
+	def test_build_filter_conditions_matches_literal_backslash_value(self):
+		"""A filter value that genuinely contains a backslash
+		must still match the row it's meant to after the escaping fix."""
+		from frappe.database.query import Engine
+
+		todo = frappe.get_doc({"doctype": "ToDo", "description": r"C:\Users\test"}).insert()
+		self.addCleanup(todo.delete)
+
+		engine = Engine()
+		engine.get_query("ToDo", db_query_compat=True)
+		conditions = []
+		engine.build_filter_conditions([["ToDo", "description", "=", r"C:\Users\test"]], conditions)
+		cond = " and ".join(conditions)
+
+		rows = frappe.db.sql(f"SELECT name FROM `tabToDo` WHERE 1=1 and {cond}", as_dict=True)
+		self.assertIn(todo.name, [r.name for r in rows])
+
 
 # This function is used as a permission query condition hook
 def test_permission_hook_condition(user):
 	return "`tabDashboard Settings`.`name` = 'Administrator'"
+
+
+# Used to simulate "user cannot see any row of this doctype" for LinkTableField tests.
+def test_deny_all_permission_hook(user, doctype=None):
+	return "1=0"
+
+
+# Returns a raw SQL string referencing the target's own table, to verify it still applies
+# to the aliased link table when fetched via dot-notation.
+def allow_named_target_hook(user, doctype=None):
+	return f"`tab{doctype}`.`value` = 'Allowed tab{doctype} batch'"

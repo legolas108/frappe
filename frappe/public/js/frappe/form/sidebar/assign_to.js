@@ -110,10 +110,8 @@ frappe.ui.form.AssignToDialog = class AssignToDialog {
 			title: __("Add to ToDo"),
 			fields: me.get_fields(),
 			primary_action_label: __("Add"),
-			primary_action: function () {
-				let args = me.dialog.get_values();
-
-				if (args && args.assign_to) {
+			primary_action: function (args) {
+				if (args.assign_to) {
 					me.dialog.set_message("Assigning...");
 
 					frappe.call({
@@ -285,8 +283,8 @@ frappe.ui.form.AssignmentClass = class AssignmentClass {
 		const row = $(`
 			<div class="dialog-assignment-row" data-user="${assignment}">
 				<div class="assignee">
-					${frappe.avatar(assignment)}
-					${frappe.user.full_name(assignment)}
+					${frappe.avatar(assignment, "avatar-smaller")}
+					<span>${frappe.user.full_name(assignment)}</span>
 				</div>
 				<div class="btn-group btn-group-sm" role="group" aria-label="Actions">
 				</div>
@@ -296,11 +294,15 @@ frappe.ui.form.AssignmentClass = class AssignmentClass {
 		const btn_group = row.find(".btn-group");
 
 		if (assignment === frappe.session.user) {
-			btn_group.append(`
-				<button type="button" class="btn complete-btn" title="${__("Done")}">
-					${frappe.utils.icon("tick", "xs")}
-				</button>
-			`);
+			btn_group.append(
+				frappe.ui.button.html({
+					icon: "check",
+					variant: "ghost",
+					size: "xs",
+					title: __("Done"),
+					css_class: "complete-btn",
+				})
+			);
 			btn_group.find(".complete-btn").click(() => {
 				this.close_assignment(assignment).then((assignments) => {
 					row.remove();
@@ -323,11 +325,15 @@ frappe.ui.form.AssignmentClass = class AssignmentClass {
 		}
 
 		if (assignment === frappe.session.user || this.frm.perm[0].write) {
-			btn_group.append(`
-				<button type="button" class="btn remove-btn" title="${__("Cancel")}">
-				${frappe.utils.icon("x")}
-				</button>
-			`);
+			btn_group.append(
+				frappe.ui.button.html({
+					icon: "x",
+					variant: "ghost",
+					size: "xs",
+					title: __("Cancel"),
+					css_class: "remove-btn",
+				})
+			);
 			btn_group.find(".remove-btn").click(() => {
 				this.remove_assignment(assignment).then((assignments) => {
 					row.remove();

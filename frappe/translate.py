@@ -329,6 +329,9 @@ def get_messages_from_doctype(name):
 
 		if d.fieldtype == "Select" and d.options:
 			options = d.options.split("\n")
+			# for workflow state, we don't want to translate the icon(css classnames)
+			if d.fieldname == "icon" and name == "Workflow State":
+				continue
 			if "icon" not in options[0]:
 				messages.extend(options)
 		if d.fieldtype == "HTML" and d.options:
@@ -620,7 +623,7 @@ def extract_messages_from_python_code(code: str) -> list[tuple[int, str, str | N
 
 	for message in extract_python(
 		io.BytesIO(code.encode()),
-		keywords=["_", "_lt"],
+		keywords=["_", "_lt", "N_"],
 		comment_tags=(),
 		options={},
 	):
@@ -883,7 +886,7 @@ def deduplicate_messages(messages):
 
 
 @frappe.whitelist()
-def update_translations_for_source(source=None, translation_dict=None):
+def update_translations_for_source(source: str | None = None, translation_dict: str | None = None):
 	if not (source and translation_dict):
 		return
 
@@ -957,6 +960,13 @@ def print_language(language: str):
 	    html = frappe.get_print(...)
 	```
 	"""
+	# a background job resolves its user's language on the first translation, which
+	# would undo the requested one mid-print — settle it before switching
+	job = getattr(frappe.local, "job", None)
+	if job is not None and not job.lang_resolved:
+		frappe.set_user_lang(job.user)
+		job.lang_resolved = True
+
 	if not language or language == frappe.local.lang:
 		# do nothing
 		yield
@@ -964,17 +974,20 @@ def print_language(language: str):
 
 	# remember original values
 	_lang = frappe.local.lang
-	_jenv = frappe.local.jenv
+	_jenv_restricted = getattr(frappe.local, "jenv_restricted", None)
+	_jenv_unrestricted = getattr(frappe.local, "jenv_unrestricted", None)
 
 	# set language, empty any existing lang_full_dict and jenv
 	frappe.local.lang = language
-	frappe.local.jenv = None
+	frappe.local.jenv_restricted = None
+	frappe.local.jenv_unrestricted = None
 
-	yield
-
-	# restore original values
-	frappe.local.lang = _lang
-	frappe.local.jenv = _jenv
+	try:
+		yield
+	finally:
+		frappe.local.lang = _lang
+		frappe.local.jenv_restricted = _jenv_restricted
+		frappe.local.jenv_unrestricted = _jenv_unrestricted
 
 
 # Backward compatibility

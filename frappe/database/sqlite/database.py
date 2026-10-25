@@ -11,6 +11,7 @@ from frappe.database.database import (
 	ImplicitCommitError,
 )
 from frappe.database.sqlite.schema import SQLiteTable
+from frappe.database.utils import convert_backtick_identifiers
 from frappe.utils import get_table_name
 
 _PARAM_COMP = re.compile(r"%\([\w]*\)s")
@@ -442,6 +443,16 @@ class SQLiteDatabase(SQLiteExceptionUtil, Database):
 
 		return self._cursor.execute(query, values or ())
 
+	def log_query(self, query, query_type, values, debug):
+		# sqlite3 cursors expose no equivalent of the executed statement, so the
+		# mogrified query is what `last_query` reports. MariaDB and Postgres both
+		# publish this attribute; without it anything reading `db.last_query`
+		# (e.g. IntegrationTestCase.assertQueryCount) breaks only on SQLite.
+		mogrified_query = self.lazy_mogrify(query, values)
+		self.last_query = mogrified_query
+		self._log_query(mogrified_query, query_type, debug, query)
+		return mogrified_query
+
 	def sql(self, *args, **kwargs):
 		if args:
 			# since tuple is immutable
@@ -558,9 +569,9 @@ def modify_query(query):
 	"""
 	Modifies query according to the requirements of SQLite
 	"""
-	# Replace ` with " for definitions
+	# Replace ` with " only where a backtick delimits an identifier
 	query = str(query)
-	query = query.replace("`", '"')
+	query = convert_backtick_identifiers(query)
 	query = replace_locate_with_instr(query)
 
 	# Select from requires ""

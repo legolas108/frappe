@@ -85,11 +85,10 @@ function make_dialog(frm) {
 			},
 		],
 		primary_action: () => {
-			let fieldname = props.field.df.fieldname;
-			let field_option = props.field.df.options;
+			let filter_doctype = get_filter_doctype();
 			let filters = frm.filter_group.get_filters().map((filter) => {
 				// filter_group component requires options and frm.set_query requires fieldname so storing both
-				filter[0] = field_option;
+				filter[0] = filter_doctype;
 				return filter;
 			});
 
@@ -150,8 +149,12 @@ function add_existing_filter(frm, df) {
 	}
 }
 
+function get_filter_doctype() {
+	return props.field.df.fieldtype === "Attachment Gallery" ? "File" : props.field.df.options;
+}
+
 function edit_filters() {
-	const field_doctype = props.field.df.options;
+	const field_doctype = get_filter_doctype();
 
 	if (!field_doctype) {
 		frappe.throw({
@@ -214,43 +217,33 @@ onMounted(() => selected.value && label_input.value.focus_on_label());
 						:empty_label="`${__('No Label')} (${field.df.fieldtype})`"
 						v-model="field.df.label"
 					/>
-					<div class="reqd-asterisk" v-if="field.df.reqd">*</div>
 					<div
 						class="help-icon"
 						v-if="field.df.documentation_url"
-						v-html="frappe.utils.icon('help', 'sm')"
+						v-html="frappe.utils.icon('info', 'xs')"
 					/>
+					<div class="reqd-asterisk" v-if="field.df.reqd">*</div>
 				</div>
 			</template>
 			<template #actions>
 				<div class="field-actions" :hidden="store.read_only">
 					<button
-						v-if="field.df.fieldtype === 'Link'"
+						v-if="['Attachment Gallery', 'Link'].includes(field.df.fieldtype)"
 						class="btn btn-xs btn-icon"
 						:class="is_filter_applied()"
 						@click="edit_filters"
 					>
-						<div v-html="frappe.utils.icon('filter', 'sm')" />
+						<div v-html="frappe.utils.icon('funnel', 'sm')" />
 					</button>
 					<AddFieldButton ref="add_field_ref" :column="column" :field="field">
-						<div v-html="frappe.utils.icon('add', 'sm')" />
+						<div v-html="frappe.utils.icon('plus', 'sm')" />
 					</AddFieldButton>
-					<button
-						v-if="column.fields.indexOf(field)"
-						class="btn btn-xs btn-icon"
-						:title="
-							__('Move the current field and the following fields to a new column')
-						"
-						@click="move_fields_to_column"
-					>
-						<div v-html="frappe.utils.icon('move', 'sm')" />
-					</button>
 					<button
 						class="btn btn-xs btn-icon"
 						:title="__('Duplicate field')"
 						@click.stop="duplicate_field"
 					>
-						<div v-html="frappe.utils.icon('duplicate', 'sm')" />
+						<div v-html="frappe.utils.icon('copy', 'sm')" />
 					</button>
 					<button
 						v-if="field.df.fieldtype === 'Table' && field.df.options"
@@ -265,7 +258,7 @@ onMounted(() => selected.value && label_input.value.focus_on_label());
 						:title="__('Remove field')"
 						@click.stop="remove_field"
 					>
-						<div v-html="frappe.utils.icon('remove', 'sm')" />
+						<div v-html="frappe.utils.icon('x', 'sm')" />
 					</button>
 				</div>
 			</template>
@@ -278,7 +271,7 @@ onMounted(() => selected.value && label_input.value.focus_on_label());
 	text-align: left;
 	width: 100%;
 	background-color: var(--bg-light-gray);
-	border-radius: var(--border-radius-sm);
+	border-radius: var(--radius);
 	border: 1px solid transparent;
 	padding: 0.3rem;
 	font-size: var(--text-sm);
@@ -316,6 +309,13 @@ onMounted(() => selected.value && label_input.value.focus_on_label());
 				margin-left: 3px;
 				color: var(--text-muted);
 				cursor: pointer;
+				display: flex;
+				align-items: center;
+				height: 1em;
+				:deep(svg) {
+					width: 10px;
+					height: 10px;
+				}
 			}
 		}
 

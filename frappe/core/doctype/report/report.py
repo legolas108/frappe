@@ -5,16 +5,17 @@ import json
 import threading
 
 import frappe
-import frappe.desk.query_report
 from frappe import _, scrub
 from frappe.core.doctype.custom_role.custom_role import get_custom_allowed_roles
 from frappe.core.doctype.page.page import delete_custom_role
+from frappe.desk.query_report import _run
 from frappe.desk.reportview import append_totals_row
 from frappe.model.document import Document
 from frappe.modules import make_boilerplate
 from frappe.modules.export_file import export_to_files
 from frappe.utils import cint, cstr
 from frappe.utils.safe_exec import check_safe_sql_query, safe_exec
+from frappe.utils.xlsxutils import XLSXMetadata, XLSXStyleBuilder
 
 
 class Report(Document):
@@ -24,6 +25,7 @@ class Report(Document):
 	from typing import TYPE_CHECKING
 
 	if TYPE_CHECKING:
+		from frappe.core.doctype.doctype_to_sync.doctype_to_sync import DoctypeToSync
 		from frappe.core.doctype.has_role.has_role import HasRole
 		from frappe.core.doctype.report_column.report_column import ReportColumn
 		from frappe.core.doctype.report_filter.report_filter import ReportFilter
@@ -32,7 +34,10 @@ class Report(Document):
 		add_total_row: DF.Check
 		add_translate_data: DF.Check
 		columns: DF.Table[ReportColumn]
+		disable_prepared_report_automation: DF.Check
 		disabled: DF.Check
+		doctype_to_sync: DF.Table[DoctypeToSync]
+		documentation_url: DF.Data | None
 		filters: DF.Table[ReportFilter]
 		is_standard: DF.Literal["No", "Yes"]
 		javascript: DF.Code | None
@@ -47,6 +52,7 @@ class Report(Document):
 		report_script: DF.Code | None
 		report_type: DF.Literal["Report Builder", "Query Report", "Script Report", "Custom Report"]
 		roles: DF.Table[HasRole]
+		snapshot_report: DF.Check
 		timeout: DF.Int
 	# end: auto-generated types
 
@@ -72,8 +78,7 @@ class Report(Document):
 				frappe.throw(_("Cannot edit a standard report. Please duplicate and create a new report"))
 
 		if self.is_standard == "Yes":
-			if frappe.session.user != "Administrator":
-				frappe.throw(_("Only Administrator can save a standard report. Please rename and save."))
+			self.validate_standard_report()
 
 			# Letter Head is visible only for non-standard reports.
 			# It should not remain set when it's invisible.
@@ -93,14 +98,34 @@ class Report(Document):
 		doc.prepared_report = 0
 
 	def on_trash(self):
-		if (
-			self.is_standard == "Yes"
-			and not cint(getattr(frappe.local.conf, "developer_mode", 0))
-			and not frappe.flags.in_migrate
-			and not frappe.flags.in_patch
-		):
-			frappe.throw(_("You are not allowed to delete Standard Report"))
+		if self.is_standard == "Yes":
+			if (
+				not cint(getattr(frappe.local.conf, "developer_mode", 0))
+				and not frappe.flags.in_migrate
+				and not frappe.flags.in_patch
+			):
+				frappe.throw(_("You are not allowed to delete Standard Report"))
+
+			if frappe.conf.developer_mode and not frappe.flags.in_test:
+				frappe.db.after_commit(self.delete_report_folder)
+
 		delete_custom_role("report", self.name)
+
+	def clear_cache(self):
+		from frappe.desk.doctype.sidebar.sidebar import clear_computed_base_for
+
+		self.update_report_cache()
+		# a module with no `Sidebar` has its sidebar computed from reports like this one
+		clear_computed_base_for(self)
+		return super().clear_cache()
+
+	def update_report_cache(self):
+		frappe.cache.delete_key("bootinfo")
+
+	def delete_report_folder(self):
+		from frappe.modules.export_file import delete_folder
+
+		delete_folder(self.module, "Report", self.name)
 
 	def get_permission_log_options(self, event=None):
 		return {"fields": ["roles"]}
@@ -168,7 +193,7 @@ class Report(Document):
 
 		start_time = datetime.datetime.now()
 		prepared_report_watcher = None
-		if not self.prepared_report:
+		if not self.prepared_report and not self.disable_prepared_report_automation:
 			prepared_report_watcher = threading.Timer(
 				interval=threshold,
 				function=enable_prepared_report,
@@ -179,7 +204,10 @@ class Report(Document):
 		# The JOB
 		try:
 			if self.is_standard == "Yes":
-				res = self.execute_module(filters)
+				if self.snapshot_report:
+					res = self.execute_snapshot_report(filters)
+				else:
+					res = self.execute_module(filters)
 			else:
 				res = self.execute_script(filters)
 		finally:
@@ -191,11 +219,17 @@ class Report(Document):
 
 		return res
 
+	def get_module_method(self, method):
+		if method not in ("execute", "execute_snapshot_report", "get_xlsx_styles"):
+			raise Exception("Unknown report method")
+
+		module = self.module or frappe.db.get_value("DocType", self.ref_doctype, "module")
+		method_path = get_report_module_dotted_path(module, self.name) + "." + method
+		return frappe.get_attr(method_path)
+
 	def execute_module(self, filters):
 		# report in python module
-		module = self.module or frappe.db.get_value("DocType", self.ref_doctype, "module")
-		method_name = get_report_module_dotted_path(module, self.name) + ".execute"
-		return frappe.get_attr(method_name)(frappe._dict(filters))
+		return self.get_module_method("execute")(frappe._dict(filters))
 
 	def execute_script(self, filters):
 		# server script
@@ -205,6 +239,13 @@ class Report(Document):
 			return loc["data"]
 		else:
 			return self.get_columns(), loc["result"]
+
+	def execute_snapshot_report(self, filters):
+		try:
+			execute_snapshot_report = self.get_module_method("execute_snapshot_report")
+		except AttributeError:
+			return [], []
+		return execute_snapshot_report(frappe._dict(filters))
 
 	def get_data(
 		self,
@@ -231,8 +272,8 @@ class Report(Document):
 		self, filters=None, user=None, ignore_prepared_report=False, are_default_filters=True
 	):
 		columns, result = [], []
-		data = frappe.desk.query_report.run(
-			self.name,
+		data = _run(
+			report_name=self.name,
 			filters=filters,
 			user=user,
 			ignore_prepared_report=ignore_prepared_report,
@@ -303,8 +344,6 @@ class Report(Document):
 			columns = params.get("fields")
 		elif params.get("columns"):
 			columns = params.get("columns")
-		elif params.get("fields"):
-			columns = params.get("fields")
 		else:
 			columns = [["name", self.ref_doctype]]
 			columns.extend(
@@ -353,28 +392,39 @@ class Report(Document):
 		return order_by, group_by, group_by_args
 
 	def build_standard_report_columns(self, columns, group_by_args):
-		_columns = []
+		from frappe.model.meta import get_default_df
+
+		report_columns = []
 
 		for fieldname, doctype in columns:
 			meta = frappe.get_meta(doctype)
 
-			if meta.get_field(fieldname):
-				field = meta.get_field(fieldname)
+			if meta_df := meta.get_field(fieldname):
+				column = meta_df.as_dict()
+			elif default_df := get_default_df(fieldname):
+				column = default_df.copy()
+
+				if not column.get("label"):
+					column.label = meta.get_label(fieldname)
 			else:
-				if fieldname == "_aggregate_column":
-					label = get_group_by_column_label(group_by_args, meta)
-				else:
-					label = meta.get_label(fieldname)
+				label = (
+					get_group_by_column_label(group_by_args, meta)
+					if fieldname == "_aggregate_column"
+					else meta.get_label(fieldname)
+				)
 
-				field = frappe._dict(fieldname=fieldname, label=label)
+				column = frappe._dict(
+					{
+						"fieldname": fieldname,
+						"label": label,
+						"fieldtype": "Link" if fieldname == "name" else "Data",
+						"options": doctype if fieldname == "name" else None,
+					}
+				)
 
-				# since name is the primary key for a document, it will always be a Link datatype
-				if fieldname == "name":
-					field.fieldtype = "Link"
-					field.options = doctype
+			report_columns.append(column)
 
-			_columns.append(field)
-		return _columns
+		return report_columns
 
 	def build_data_dict(self, result, columns):
 		data = []
@@ -390,12 +440,36 @@ class Report(Document):
 
 		return data
 
+	def validate_standard_report(self):
+		if frappe.session.user != "Administrator":
+			frappe.throw(_("Only Administrator can save a standard report. Please rename and save."))
+
+		if not cint(frappe.conf.developer_mode) and not (
+			frappe.flags.in_migrate
+			or frappe.flags.in_patch
+			or frappe.flags.in_install
+			or frappe.flags.in_import
+		):
+			frappe.throw(_("Standard reports can only be created in developer mode."))
+
 	@frappe.whitelist()
 	def toggle_disable(self, disable: bool):
 		if not self.has_permission("write"):
 			frappe.throw(_("You are not allowed to edit the report."))
 
 		self.db_set("disabled", cint(disable))
+
+	def get_xlsx_styles_from_module(self, metadata: XLSXMetadata) -> dict:
+		if self.is_standard != "Yes" or self.report_type not in ("Query Report", "Script Report"):
+			return
+
+		try:
+			method = self.get_module_method("get_xlsx_styles")
+		except AttributeError:
+			# Ignore if hook(method) is not defined
+			return
+
+		return method(metadata)
 
 
 def is_prepared_report_enabled(report):

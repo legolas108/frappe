@@ -81,10 +81,6 @@ frappe.views.Page = class Page {
 				frappe.show_not_found(name);
 				return;
 			}
-			if (this.pagedoc.page_name != "setup-wizard") {
-				this.pagedoc.module &&
-					frappe.app.sidebar.show_sidebar_for_module(this.pagedoc.module);
-			}
 
 			this.wrapper = frappe.container.add_page(this.name);
 			this.wrapper.page_name = this.pagedoc.name;
@@ -93,17 +89,10 @@ frappe.views.Page = class Page {
 			if (this.pagedoc.content) this.wrapper.innerHTML = this.pagedoc.content;
 			frappe.dom.eval(this.pagedoc.__script || this.pagedoc.script);
 			frappe.dom.set_style(this.pagedoc.style || "");
-
-			// set breadcrumbs
-			frappe.breadcrumbs.add(this.pagedoc.module || null);
 		}
 
 		this.trigger_page_event("on_page_load");
-		frappe.breadcrumbs.add({
-			type: "Custom",
-			label: __(this.pagedoc.title),
-			route: frappe.get_route_str(),
-		});
+		this.wrapper.page?.set_breadcrumbs([{ label: __(this.pagedoc.title) }]);
 
 		// set events
 		$(this.wrapper).on("show", function () {
@@ -134,7 +123,6 @@ frappe.show_not_permitted = function (page_name) {
 		page_name: page_name,
 		message: __("Sorry! You are not permitted to view this page."),
 		img: "/assets/frappe/images/ui/bubble-tea-sorry.svg",
-		// icon: "octicon octicon-circle-slash"
 	});
 };
 

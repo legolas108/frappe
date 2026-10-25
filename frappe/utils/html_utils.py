@@ -7,6 +7,11 @@ from bleach_allowlist import bleach_allowlist
 import frappe
 from frappe.utils.data import escape_html
 
+# Matches the first opening tag. Deliberately equivalent to
+# `bool(BeautifulSoup(html, "html.parser").find())`, which treats comments, `<3`
+# and unmatched end tags as text rather than tags — see `test_html_utils.py`.
+HTML_TAG_PATTERN = re.compile(r"<[a-zA-Z][^>]*>")
+
 EMOJI_PATTERN = re.compile(
 	"(\ud83d[\ude00-\ude4f])|"
 	"(\ud83c[\udf00-\uffff])|"
@@ -44,6 +49,7 @@ def clean_html(html):
 			"tbody",
 			"td",
 			"tr",
+			"a",
 		},
 		clean_content_tags=REMOVE_CONTENT_TAGS,
 		strip_comments=True,
@@ -128,6 +134,11 @@ def clean_email_html(html):
 	)
 
 
+def has_html_tags(html: str) -> bool:
+	"""Return True if `html` contains at least one HTML tag."""
+	return bool(HTML_TAG_PATTERN.search(html))
+
+
 def clean_script_and_style(html):
 	"""
 	Remove script and style tags.
@@ -149,8 +160,6 @@ def sanitize_html(html, linkify=False, always_sanitize=False, disallowed_tags=No
 
 	Does not sanitize JSON unless explicitly specified, as it could lead to future problems
 	"""
-	from bs4 import BeautifulSoup
-
 	if not isinstance(html, str):
 		return html
 
@@ -158,7 +167,7 @@ def sanitize_html(html, linkify=False, always_sanitize=False, disallowed_tags=No
 		if is_json(html):
 			return html
 
-		if not bool(BeautifulSoup(html, "html.parser").find()):
+		if not has_html_tags(html):
 			return html
 
 	tags = (
@@ -169,18 +178,23 @@ def sanitize_html(html, linkify=False, always_sanitize=False, disallowed_tags=No
 
 	# Allow caller to explicitly disallow some tags
 	if disallowed_tags:
-		tags.difference_update(disallowed_tags)
+		if disallowed_tags == "*":
+			tags = set()
+		else:
+			tags.difference_update(disallowed_tags)
 
 	attributes = {"*": acceptable_attributes, "svg": svg_attributes}
 
-	# returns html with escaped tags, escaped orphan >, <, etc.
+	# returns sanitized HTML with unsafe tags and attributes removed
 	escaped_html = nh3.clean(
 		html,
 		tags=tags,
 		attributes=attributes,
 		generic_attribute_prefixes={"data-"},
 		strip_comments=False,
-		filter_style_properties=set(bleach_allowlist.all_styles),
+		# bleach's allowlist has column-gap but not gap/row-gap — add them so
+		# flex/grid layouts (already allowed via display/flex) keep their spacing
+		filter_style_properties=set(bleach_allowlist.all_styles) | {"gap", "row-gap"},
 		url_schemes=nh3.ALLOWED_URL_SCHEMES.union({"cid"}),
 	)
 

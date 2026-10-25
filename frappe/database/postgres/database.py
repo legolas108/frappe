@@ -26,7 +26,7 @@ from psycopg2.extensions import ISOLATION_LEVEL_REPEATABLE_READ
 import frappe
 from frappe.database.database import Database
 from frappe.database.postgres.schema import PostgresTable
-from frappe.database.utils import EmptyQueryValues, LazyDecode
+from frappe.database.utils import EmptyQueryValues, LazyDecode, convert_backtick_identifiers
 from frappe.utils import cstr, get_table_name
 
 # cast decimals as floats
@@ -486,13 +486,10 @@ class PostgresDatabase(PostgresExceptionUtil, Database):
 	def get_database_list(self):
 		return self.sql("SELECT datname FROM pg_database", pluck=True)
 
-	def estimate_count(self, doctype: str):
-		"""Get estimated count of total rows in a table."""
+	def _estimate_count(self, table: str) -> int:
 		from frappe.utils.data import cint
 
-		table = get_table_name(doctype)
-
-		# Scope to current database to avoid cross-site estimates
+		# Scope to current schema to avoid cross-site estimates
 		count = self.sql(
 			"select c.reltuples from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.relname = %s and n.nspname = %s and c.relkind = 'r'",
 			(table, self.db_schema),
@@ -519,8 +516,8 @@ class PostgresDatabase(PostgresExceptionUtil, Database):
 
 def modify_query(query):
 	""" "Modifies query according to the requirements of postgres"""
-	# replace ` with " for definitions
-	query = str(query).replace("`", '"')
+	# replace ` with " only where a backtick delimits an identifier
+	query = convert_backtick_identifiers(str(query))
 	query = replace_locate_with_strpos(query)
 	# select from requires ""
 	query = FROM_TAB_PATTERN.sub(r'from "tab\1"', query)

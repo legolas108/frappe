@@ -2,6 +2,7 @@
 # License: MIT. See LICENSE
 
 import json
+from typing import Any
 
 import frappe
 from frappe.model.document import Document
@@ -17,6 +18,7 @@ class EmailTemplate(Document):
 	if TYPE_CHECKING:
 		from frappe.types import DF
 
+		reference_doctype: DF.Link | None
 		response: DF.TextEditor | None
 		response_html: DF.Code | None
 		subject: DF.Data
@@ -66,8 +68,40 @@ class EmailTemplate(Document):
 
 
 @frappe.whitelist()
-def get_email_template(template_name, doc, sender=None):
+def get_email_template(template_name: str, doc: str | dict[str, Any], sender: str | None = None):
 	"""Return the processed HTML of a email template with the given doc"""
 
 	email_template = frappe.get_doc("Email Template", template_name)
-	return email_template.get_formatted_email(doc, sender=sender)
+	email_template.check_permission("read")
+	return {**email_template.get_formatted_email(doc, sender=sender), "use_html": email_template.use_html}
+
+
+@frappe.whitelist()
+@frappe.validate_and_sanitize_search_inputs
+def get_email_templates(
+	doctype: str,
+	txt: str,
+	searchfield: str,
+	start: int,
+	page_len: int,
+	filters: dict | str | None = None,
+):
+	"""Search for Email Templates scoped to a DocType or with no DocType assigned."""
+	if isinstance(filters, str):
+		filters = json.loads(filters)
+
+	reference_doctype = (filters or {}).get("reference_doctype", "")
+
+	return frappe.get_all(
+		"Email Template",
+		filters={"name": ("like", f"%{txt}%")},
+		or_filters=[
+			["reference_doctype", "=", reference_doctype],
+			["reference_doctype", "is", "not set"],
+			["reference_doctype", "=", ""],
+		],
+		fields=["name", "reference_doctype"],
+		limit_start=start,
+		limit_page_length=page_len,
+		as_list=True,
+	)

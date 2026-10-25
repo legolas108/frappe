@@ -25,15 +25,14 @@ from frappe.model import (
 	no_value_fields,
 	table_fields,
 )
-from frappe.model.base_document import RESERVED_KEYWORDS, get_controller
 from frappe.model.docfield import supports_translation
-from frappe.model.document import Document
+from frappe.model.document import RESERVED_KEYWORDS, Document, get_controller
 from frappe.model.meta import Meta
 from frappe.modules import get_doc_path, make_boilerplate
 from frappe.modules.import_file import get_file_path
 from frappe.permissions import ALL_USER_ROLE, AUTOMATIC_ROLES, SYSTEM_USER_ROLE
 from frappe.query_builder.functions import Concat
-from frappe.utils import cint, flt, get_datetime, is_a_property, random_string
+from frappe.utils import cint, cstr, flt, get_datetime, is_a_property, random_string
 from frappe.website.utils import clear_cache
 
 if TYPE_CHECKING:
@@ -101,6 +100,7 @@ class DocType(Document):
 
 		actions: DF.Table[DocTypeAction]
 		allow_auto_repeat: DF.Check
+		allow_bulk_edit: DF.Check
 		allow_copy: DF.Check
 		allow_events_in_timeline: DF.Check
 		allow_guest_to_view: DF.Check
@@ -113,6 +113,7 @@ class DocType(Document):
 		default_email_template: DF.Link | None
 		default_print_format: DF.Data | None
 		default_view: DF.Literal[None]
+		deprecated: DF.Check
 		description: DF.SmallText | None
 		document_type: DF.Literal["", "Document", "Setup", "System", "Other"]
 		documentation: DF.Data | None
@@ -124,7 +125,7 @@ class DocType(Document):
 		grid_page_length: DF.Int
 		has_web_view: DF.Check
 		hide_toolbar: DF.Check
-		icon: DF.Data | None
+		icon: DF.Icon | None
 		image_field: DF.Data | None
 		in_create: DF.Check
 		index_web_pages_for_search: DF.Check
@@ -181,6 +182,25 @@ class DocType(Document):
 		translated_doctype: DF.Check
 		website_search_field: DF.Data | None
 	# end: auto-generated types
+
+	def before_insert(self):
+		if not self.istable and not self.permissions:
+			self.append(
+				"permissions",
+				{
+					"role": "System Manager",
+					"read": 1,
+					"write": 1,
+					"create": 1,
+					"delete": 1,
+					"report": 1,
+					"export": 1,
+					"share": 1,
+					"print": 1,
+					"email": 1,
+					"submit": 1 if self.is_submittable else 0,
+				},
+			)
 
 	def validate(self):
 		"""Validate DocType before saving.
@@ -277,6 +297,7 @@ class DocType(Document):
 	def set_defaults_for_single_and_table(self):
 		if self.issingle:
 			self.allow_import = 0
+			self.allow_rename = 0
 			self.is_submittable = 0
 			self.istable = 0
 
@@ -549,6 +570,7 @@ class DocType(Document):
 			and (frappe.conf.developer_mode or frappe.flags.allow_doctype_export)
 		)
 		if allow_doctype_export:
+			self.warn_on_module_change()
 			self.export_doc()
 			self.make_controller_template()
 			self.set_base_class_for_controller()
@@ -690,6 +712,13 @@ class DocType(Document):
 				self.rename_files_and_folders(old, new)
 
 			clear_controller_cache(old)
+
+	def clear_cache(self):
+		from frappe.desk.doctype.sidebar.sidebar import clear_computed_base_for
+
+		# a module with no `Sidebar` has its sidebar computed from doctypes like this one
+		clear_computed_base_for(self)
+		return super().clear_cache()
 
 	def after_delete(self):
 		if not self.custom:
@@ -862,6 +891,24 @@ class DocType(Document):
 		if "field_order" in docdict:
 			del docdict["field_order"]
 
+	def warn_on_module_change(self):
+		"""Warn that the old module folder is left behind after a module change, since export only writes to the new one."""
+		previous = self.get_doc_before_save()
+		if not previous or previous.module == self.module:
+			return
+
+		try:
+			old_path = get_doc_path(previous.module, "doctype", self.name)
+		except Exception:
+			return
+
+		frappe.msgprint(
+			_(
+				"Module changed to {0}. Files in the previous module were not moved and remain at {1}, remove or relocate them manually."
+			).format(frappe.bold(self.module), frappe.bold(str(old_path))),
+			alert=True,
+		)
+
 	def export_doc(self):
 		"""Export to standard folder `[module]/doctype/[name]/[name].json`."""
 		from frappe.modules.export_file import export_to_files
@@ -989,7 +1036,13 @@ class DocType(Document):
 		self.append("fields", {"label": "Is Group", "fieldtype": "Check", "fieldname": "is_group"})
 		self.append(
 			"fields",
-			{"label": "Old Parent", "fieldtype": "Link", "options": self.name, "fieldname": "old_parent"},
+			{
+				"label": "Old Parent",
+				"fieldtype": "Link",
+				"options": self.name,
+				"fieldname": "old_parent",
+				"hidden": 1,
+			},
 		)
 
 		parent_field_label = f"Parent {self.name}"
@@ -1400,12 +1453,15 @@ def validate_fields(meta: Meta):
 	def check_illegal_default(d):
 		if d.fieldtype == "Check" and not d.default:
 			d.default = "0"
-		if d.fieldtype == "Check" and cint(d.default) not in (0, 1):
-			frappe.throw(
-				_("Default for 'Check' type of field {0} must be either '0' or '1'").format(
-					frappe.bold(d.fieldname)
+		if d.fieldtype == "Check":
+			default_value = cstr(d.default).strip()
+			if default_value not in ("0", "1"):
+				frappe.throw(
+					_("The default value for the Check field {0} must be either '0' or '1'").format(
+						frappe.bold(d.label or d.fieldname)
+					)
 				)
-			)
+			d.default = default_value
 		if d.fieldtype == "Select" and d.default:
 			if not d.options:
 				frappe.throw(
@@ -1707,6 +1763,34 @@ def validate_fields(meta: Meta):
 					)
 				)
 
+	def validate_link_filters(docfield):
+		link_filters_value = docfield.get("link_filters")
+		if not link_filters_value:
+			return
+
+		try:
+			link_filters = json.loads(link_filters_value)
+		except (TypeError, ValueError):
+			frappe.throw(
+				_("Invalid Filters for field {0}. Filters must be valid JSON.").format(
+					frappe.bold(docfield.label or docfield.fieldname)
+				)
+			)
+
+		if not isinstance(link_filters, list) or any(
+			not isinstance(filter_row, list) or len(filter_row) != 4 for filter_row in link_filters
+		):
+			frappe.throw(
+				_(
+					"Invalid Filters for field {0}. Filters must be a list of filters, where each filter is a list with four values: doctype, fieldname, operator, and value."
+				).format(frappe.bold(docfield.label or docfield.fieldname))
+			)
+
+		if docfield.fieldtype == "Attachment Gallery" and any(
+			filter_row[0] != "File" for filter_row in link_filters
+		):
+			frappe.throw(_("Attachment Gallery filters must target File."))
+
 	fields = meta.get("fields")
 	fieldname_list = [d.fieldname for d in fields]
 
@@ -1730,6 +1814,7 @@ def validate_fields(meta: Meta):
 		validate_fetch_from(d)
 		validate_data_field_type(d)
 		check_decimal_config(d)
+		validate_link_filters(d)
 
 		if not frappe.flags.in_migrate or in_ci:
 			check_unique_fieldname(meta.get("name"), d.fieldname)
@@ -1757,7 +1842,6 @@ def validate_fields(meta: Meta):
 
 def get_fields_not_allowed_in_list_view(meta) -> list[str]:
 	not_allowed_in_list_view = list(copy.copy(no_value_fields))
-	not_allowed_in_list_view.append("Attach Image")
 	if meta.istable:
 		not_allowed_in_list_view.remove("Button")
 		not_allowed_in_list_view.remove("HTML")
@@ -1917,17 +2001,25 @@ def make_module_and_roles(doc, perm_fieldname="permissions"):
 		):
 			frappe.get_doc(doctype="Domain", domain=doc.restrict_to_domain).insert()
 
-		if "tabModule Def" in frappe.db.get_tables() and not frappe.db.exists("Module Def", doc.module):
-			m = frappe.get_doc({"doctype": "Module Def", "module_name": doc.module})
-			if frappe.scrub(doc.module) in frappe.local.module_app:
-				m.app_name = frappe.local.module_app[frappe.scrub(doc.module)]
-			else:
-				m.app_name = "frappe"
-			m.flags.ignore_mandatory = m.flags.ignore_permissions = True
-			if frappe.flags.package:
-				m.package = frappe.flags.package.name
-				m.custom = 1
-			m.insert()
+		if "tabModule Def" in frappe.db.get_tables():
+			# A doctype arriving from an app brings its module with it. If the site holds that
+			# name with a custom module of its own, the app takes it and the site's module is
+			# renamed. Otherwise this does nothing, which is the case for every ordinary save.
+			from frappe.installer import reclaim_module_name_for_its_app
+
+			reclaim_module_name_for_its_app(doc.module)
+
+			if not frappe.db.exists("Module Def", doc.module):
+				m = frappe.get_doc({"doctype": "Module Def", "module_name": doc.module})
+				if frappe.scrub(doc.module) in frappe.local.module_app:
+					m.app_name = frappe.local.module_app[frappe.scrub(doc.module)]
+				else:
+					m.app_name = "frappe"
+				m.flags.ignore_mandatory = m.flags.ignore_permissions = True
+				if frappe.flags.package:
+					m.package = frappe.flags.package.name
+					m.custom = 1
+				m.insert()
 
 		roles = [p.role for p in doc.get("permissions") or []] + list(AUTOMATIC_ROLES)
 

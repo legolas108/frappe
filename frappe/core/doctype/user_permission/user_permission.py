@@ -2,13 +2,15 @@
 # License: MIT. See LICENSE
 
 import json
+from typing import Any
 
 import frappe
 from frappe import _
 from frappe.core.utils import find
 from frappe.desk.form.linked_with import get_linked_doctypes
 from frappe.model.document import Document
-from frappe.utils import cstr
+from frappe.query_builder import Order
+from frappe.utils import cint, cstr
 
 
 class UserPermission(Document):
@@ -85,13 +87,13 @@ def send_user_permissions(bootinfo):
 
 
 @frappe.whitelist()
-def get_user_permissions(user=None):
-	"""Get all users permissions for the user as a dict of doctype"""
-	# if this is called from client-side,
-	# user can access only his/her user permissions
-	if frappe.request and frappe.local.form_dict.cmd == "get_user_permissions":
-		user = frappe.session.user
+def get_current_user_permissions():
+	"""Return the permissions of the logged in user."""
+	return get_user_permissions(frappe.session.user)
 
+
+def get_user_permissions(user: str | None = None):
+	"""Get all users permissions for the user as a dict of doctype"""
 	if not user:
 		user = frappe.session.user
 
@@ -160,7 +162,9 @@ def user_permission_exists(user, allow, for_value, applicable_for=None):
 
 @frappe.whitelist()
 @frappe.validate_and_sanitize_search_inputs
-def get_applicable_for_doctype_list(doctype, txt, searchfield, start, page_len, filters):
+def get_applicable_for_doctype_list(
+	doctype: str, txt: str, searchfield: str, start: int, page_len: int, filters: dict[str, Any]
+):
 	actual_doctype = filters.get("doctype")
 	linked_doctypes_map = get_linked_doctypes(actual_doctype, True)
 
@@ -192,7 +196,7 @@ def get_permitted_documents(doctype):
 
 
 @frappe.whitelist()
-def check_applicable_doc_perm(user, doctype, docname):
+def check_applicable_doc_perm(user: str, doctype: str, docname: str | int):
 	frappe.only_for("System Manager")
 	applicable = []
 	doc_exists = frappe.get_all(
@@ -224,7 +228,7 @@ def check_applicable_doc_perm(user, doctype, docname):
 
 
 @frappe.whitelist()
-def clear_user_permissions(user, for_doctype):
+def clear_user_permissions(user: str, for_doctype: str):
 	frappe.only_for("System Manager")
 	total = frappe.db.count("User Permission", {"user": user, "allow": for_doctype})
 
@@ -242,7 +246,45 @@ def clear_user_permissions(user, for_doctype):
 
 
 @frappe.whitelist()
-def add_user_permissions(data):
+def get_user_permission_list(allow: str, txt: str | None = None, start: int = 0, page_length: int = 50):
+	"""One page of User Permissions for `allow`, with each user's name and image joined in.
+	`txt` searches the user, their name, the value and the applicable doctype."""
+	frappe.only_for("System Manager")
+
+	up = frappe.qb.DocType("User Permission")
+	user = frappe.qb.DocType("User")
+	query = (
+		frappe.qb.from_(up)
+		.left_join(user)
+		.on(up.user == user.name)
+		.select(
+			up.name,
+			up.user,
+			up.for_value,
+			up.applicable_for,
+			up.apply_to_all_doctypes,
+			user.full_name,
+			user.user_image,
+		)
+		.where(up.allow == allow)
+		.orderby(up.modified, order=Order.desc)
+		.orderby(up.name, order=Order.desc)
+		.limit(cint(page_length))
+		.offset(cint(start))
+	)
+	if txt:
+		like = f"%{txt}%"
+		query = query.where(
+			up.user.like(like)
+			| user.full_name.like(like)
+			| up.for_value.like(like)
+			| up.applicable_for.like(like)
+		)
+	return query.run(as_dict=True)
+
+
+@frappe.whitelist()
+def add_user_permissions(data: str | dict[str, Any]):
 	"""Add and update the user permissions"""
 	frappe.only_for("System Manager")
 	if isinstance(data, str):

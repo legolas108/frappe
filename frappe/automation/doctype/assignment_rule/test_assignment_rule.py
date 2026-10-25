@@ -1,7 +1,10 @@
 # Copyright (c) 2021, Frappe Technologies and Contributors
 # License: MIT. See LICENSE
 
+from unittest.mock import patch
+
 import frappe
+from frappe.automation.doctype.assignment_rule.assignment_rule import reopen_closed_assignment
 from frappe.tests import IntegrationTestCase
 from frappe.tests.utils import make_test_records
 
@@ -83,6 +86,11 @@ class TestAutoAssign(IntegrationTestCase):
 			"test@example.com",
 		)
 
+	def test_round_robin_ignores_stale_last_user(self):
+		frappe.db.set_value("Assignment Rule", self.assignment_rule.name, "last_user", "test@example.com")
+
+		self.assertEqual(self.assignment_rule.get_user_round_robin(), "test1@example.com")
+
 	def test_load_balancing(self):
 		self.assignment_rule.rule = "Load Balancing"
 		self.assignment_rule.save()
@@ -112,6 +120,26 @@ class TestAutoAssign(IntegrationTestCase):
 			self.assertEqual(
 				len(frappe.get_all("ToDo", dict(allocated_to=user, reference_type=TEST_DOCTYPE))), 10
 			)
+
+	def test_weighted_distribution(self):
+		self.assignment_rule.rule = "Weighted Distribution"
+		self.assignment_rule.weighted_users.clear()
+		self.assignment_rule.append("weighted_users", dict(user="test@example.com", weight=1))
+		self.assignment_rule.append("weighted_users", dict(user="test1@example.com", weight=2))
+		self.assignment_rule.save()
+
+		for _ in range(5):
+			_make_test_record(public=1)
+
+		# check if users are assigned based on weights (out of 5,
+		# test@example.com should have 2 assignments and test1@example.com should have 3 assignments )
+		self.assertEqual(
+			len(frappe.get_all("ToDo", dict(allocated_to="test@example.com", reference_type=TEST_DOCTYPE))), 2
+		)
+		self.assertEqual(
+			len(frappe.get_all("ToDo", dict(allocated_to="test1@example.com", reference_type=TEST_DOCTYPE))),
+			3,
+		)
 
 	def test_assingment_on_guest_submissions(self):
 		"""Sometimes documents are inserted as guest, check if assignment rules run on them. Use case: Web Forms"""
@@ -198,6 +226,18 @@ class TestAutoAssign(IntegrationTestCase):
 		self.assertEqual(todo.status, "Closed")
 		# check if closed todo retained assignment
 		self.assertEqual(todo.allocated_to, "test@example.com")
+
+	def test_closed_assignments_looked_up_once_per_save(self):
+		frappe.set_user("test@example.com")
+		note = _make_test_record(public=1, content="valid")
+
+		with patch(
+			"frappe.automation.doctype.assignment_rule.assignment_rule.reopen_closed_assignment",
+			wraps=reopen_closed_assignment,
+		) as lookup:
+			note.save()
+
+		self.assertEqual(lookup.call_count, 1)
 
 	def check_multiple_rules(self):
 		note = _make_test_record(public=1, notify_on_login=1)

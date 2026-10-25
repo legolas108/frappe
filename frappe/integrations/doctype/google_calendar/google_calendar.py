@@ -8,11 +8,8 @@ from math import ceil
 from typing import TYPE_CHECKING, TypedDict
 from zoneinfo import ZoneInfo
 
-import google.oauth2.credentials
 import requests
 from dateutil import parser
-from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
 
 import frappe
 from frappe import _, _lt
@@ -192,7 +189,7 @@ def get_authentication_url(client_id=None, redirect_uri=None):
 
 
 @frappe.whitelist()
-def google_callback(code=None):
+def google_callback(code: str | None = None):
 	"""
 	Authorization code is sent to callback as per the API configuration
 	"""
@@ -219,6 +216,9 @@ def sync(g_calendar: str | None = None):
 
 def get_google_calendar_object(g_calendar):
 	"""Return an object of Google Calendar along with Google Calendar doc."""
+	import google.oauth2.credentials
+	from googleapiclient.discovery import build
+
 	google_settings = frappe.get_cached_doc("Google Settings")
 	account: GoogleCalendar = frappe.get_doc("Google Calendar", g_calendar)
 
@@ -244,6 +244,8 @@ def check_google_calendar(account: GoogleCalendar, google_calendar):
 	Checks if Google Calendar is present with the specified name.
 	If not, creates one.
 	"""
+	from googleapiclient.errors import HttpError
+
 	if account.google_calendar_id:
 		try:
 			return google_calendar.calendars().get(calendarId=account.google_calendar_id).execute()
@@ -278,6 +280,8 @@ def sync_events_from_google_calendar(g_calendar, method=None):
 	nextSyncToken is returned at the very last page
 	https://developers.google.com/calendar/v3/sync
 	"""
+	from googleapiclient.errors import HttpError
+
 	google_calendar, account = get_google_calendar_object(g_calendar)
 
 	if not account.pull_from_google_calendar:
@@ -352,21 +356,22 @@ def sync_events_from_google_calendar(g_calendar, method=None):
 					"google_calendar_event_id": event.get("id"),
 				},
 			)
-			frappe.db.set_value(
-				"Event",
-				event_name,
-				"status",
-				"Closed",
-			)
-			frappe.get_doc(
-				{
-					"doctype": "Comment",
-					"comment_type": "Info",
-					"reference_doctype": "Event",
-					"reference_name": event_name,
-					"content": " - Event deleted from Google Calendar.",
-				}
-			).insert(ignore_permissions=True)
+			if event_name:
+				frappe.db.set_value(
+					"Event",
+					event_name,
+					"status",
+					"Closed",
+				)
+				frappe.get_doc(
+					{
+						"doctype": "Comment",
+						"comment_type": "Info",
+						"reference_doctype": "Event",
+						"reference_name": event_name,
+						"content": " - Event deleted from Google Calendar.",
+					}
+				).insert(ignore_permissions=True)
 
 	if not results:
 		return _("No Google Calendar Event to sync.")
@@ -441,6 +446,8 @@ def insert_event_in_google_calendar(doc, method=None):
 	"""
 	Insert Events in Google Calendar if sync_with_google_calendar is checked.
 	"""
+	from googleapiclient.errors import HttpError
+
 	if (
 		not doc.sync_with_google_calendar
 		or doc.pulled_from_google_calendar
@@ -503,6 +510,8 @@ def update_event_in_google_calendar(doc, method=None):
 	"""
 	Updates Events in Google Calendar if any existing event is modified in Frappe Calendar
 	"""
+	from googleapiclient.errors import HttpError
+
 	# Workaround to avoid triggering updation when Event is being inserted since
 	# creation and modified are same when inserting doc
 	if (
@@ -587,6 +596,7 @@ def delete_event_from_google_calendar(doc, method=None):
 	"""
 	Delete Events from Google Calendar if Frappe Event is deleted.
 	"""
+	from googleapiclient.errors import HttpError
 
 	if not frappe.db.exists("Google Calendar", {"name": doc.google_calendar, "push_to_google_calendar": 1}):
 		return

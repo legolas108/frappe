@@ -16,6 +16,7 @@ import importlib
 import inspect
 import json
 import os
+import re
 import sys
 import threading
 import warnings
@@ -41,7 +42,7 @@ from frappe.utils.caching import deprecated_local_cache as local_cache
 from frappe.utils.caching import request_cache, site_cache
 from frappe.utils.data import as_unicode, bold, cint, cstr, safe_decode, safe_encode, sbool
 from frappe.utils.local import Local, LocalProxy, release_local
-from frappe.utils.translations import _, _lt, set_user_lang
+from frappe.utils.translations import N_, _, _lt, set_user_lang
 
 # Local application imports
 from .exceptions import *
@@ -54,7 +55,7 @@ from .utils.jinja import (
 	render_template,
 )
 
-__version__ = "16.6.0"
+__version__ = "16.53.0"
 __title__ = "Frappe Framework"
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -76,6 +77,7 @@ local = Local()
 cache: "RedisWrapper" | None = None
 client_cache: "ClientCache" | None = None
 STANDARD_USERS = ("Guest", "Administrator")
+SITE_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9._-]+$")
 
 # this global may be subsequently changed by frappe.tests.utils.toggle_test_mode()
 in_test = False
@@ -139,10 +141,27 @@ if TYPE_CHECKING:  # pragma: no cover
 	lang: str
 
 
-def init(site: str, sites_path: str = ".", new_site: bool = False, force: bool = False) -> None:
+def init(
+	site: str,
+	sites_path: str = ".",
+	new_site: bool = False,
+	force: bool = False,
+	*,
+	is_request=False,
+	is_job=False,
+) -> None:
 	"""Initialize frappe for the current site. Reset thread locals `frappe.local`"""
-	if getattr(local, "initialised", None) and not force:
+	# Reset locals at start of the request.
+	# Previous request can fail in ways we might have no control over.
+	# release_local is inexpensive, so trigger it before every request/job.
+	if force:
+		release_local(local)
+
+	if getattr(local, "initialised", None):
 		return
+
+	if site and not SITE_NAME_PATTERN.match(site):
+		raise ValueError(f"Invalid site name `{site}`")
 
 	local.error_log = []
 	local.message_log = []
@@ -178,7 +197,7 @@ def init(site: str, sites_path: str = ".", new_site: bool = False, force: bool =
 	local.response_headers = Headers()
 	local.task_id = None
 
-	local.conf = get_site_config(sites_path=sites_path, site_path=site_path, cached=bool(frappe.request))
+	local.conf = get_site_config(sites_path=sites_path, site_path=site_path, cached=is_request)
 	local.lang = local.conf.lang or "en"
 
 	local.module_app = None
@@ -191,7 +210,8 @@ def init(site: str, sites_path: str = ".", new_site: bool = False, force: bool =
 	local.new_doc_templates = {}
 
 	local.request_cache = defaultdict(dict)
-	local.jenv = None
+	local.jenv_restricted = None
+	local.jenv_unrestricted = None
 	local.jloader = None
 	local.cache = {}
 	local.form_dict = _dict()
@@ -202,7 +222,7 @@ def init(site: str, sites_path: str = ".", new_site: bool = False, force: bool =
 	if not cache or not client_cache:
 		setup_redis_cache_connection()
 
-	setup_module_map(include_all_apps=not (frappe.request or frappe.job or frappe.flags.in_migrate))
+	setup_module_map(include_all_apps=not (is_request or is_job or frappe.flags.in_migrate))
 
 	local.initialised = True
 
@@ -309,10 +329,11 @@ class init_site:
 
 def destroy():
 	"""Closes connection and releases werkzeug local."""
-	if db:
-		db.close()
-
-	release_local(local)
+	try:
+		if db:
+			db.close()
+	finally:
+		release_local(local)
 
 
 _redis_init_lock = threading.Lock()
@@ -366,7 +387,8 @@ def set_user(username: str):
 	local.session.sid = username
 	local.cache = {}
 	local.form_dict = _dict()
-	local.jenv = None
+	local.jenv_restricted = None
+	local.jenv_unrestricted = None
 	local.session.data = _dict()
 	local.role_permissions = {}
 	local.new_doc_templates = {}
@@ -459,6 +481,9 @@ def is_whitelisted(method):
 
 	is_guest = session["user"] == "Guest"
 	if method not in whitelisted or (is_guest and method not in guest_methods):
+		if method in whitelisted and is_guest and response.get("session_expired"):
+			raise SessionExpired
+
 		summary = _("You are not permitted to access this resource. Login to access")
 		detail = _("Function {0} is not whitelisted.").format(bold(f"{method.__module__}.{method.__name__}"))
 		msg = f"<details><summary>{summary}</summary>{detail}</details>"
@@ -499,6 +524,7 @@ def read_only():
 def write_only():
 	# if replica connection exists, we have to replace it momentarily with the primary connection
 	def innfn(fn):
+		@functools.wraps(fn)
 		def wrapper_fn(*args, **kwargs):
 			primary_db = getattr(local, "primary_db", None)
 			replica_db = getattr(local, "replica_db", None)
@@ -1472,23 +1498,23 @@ def logger(
 def get_desk_link(doctype, name, show_title_with_name=False, open_in_new_tab=False):
 	from urllib.parse import quote
 
+	from frappe.desk.utils import slug
+	from frappe.utils.data import quoted
+
 	meta = get_meta(doctype)
 	title = get_value(doctype, name, meta.get_title_field())
 
 	target_attr = ' target="_blank"' if open_in_new_tab else ""
 
-	# encode for href
-	encoded_name = quote(name)
-
 	if show_title_with_name and name != title:
-		html = '<a href="/desk/Form/{doctype}/{encoded_name}"{target} style="font-weight: bold;">{doctype_local} {name}: {title_local}</a>'
+		html = '<a href="/desk/{doctype}/{encoded_name}"{target} style="font-weight: bold;">{doctype_local} {name}: {title_local}</a>'
 	else:
-		html = '<a href="/desk/Form/{doctype}/{encoded_name}"{target} style="font-weight: bold;">{doctype_local} {title_local}</a>'
+		html = '<a href="/desk/{doctype}/{encoded_name}"{target} style="font-weight: bold;">{doctype_local} {title_local}</a>'
 
 	return html.format(
-		doctype=doctype,
+		doctype=quoted(slug(doctype)),
 		name=name,
-		encoded_name=encoded_name,
+		encoded_name=quote(cstr(name), safe=""),
 		doctype_local=_(doctype),
 		title_local=_(title),
 		target=target_attr,
@@ -1589,6 +1615,7 @@ from frappe.utils.error import log_error
 from frappe.utils.formatters import format_value
 from frappe.utils.print_utils import get_print, attach_print
 from frappe.email import sendmail
+from frappe.concurrency_limiter import concurrent_limit
 
 # for backwards compatibility
 format = format_value

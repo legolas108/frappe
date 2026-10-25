@@ -22,6 +22,7 @@ class Workflow(Document):
 		from frappe.workflow.doctype.workflow_transition.workflow_transition import WorkflowTransition
 
 		document_type: DF.Link
+		enable_action_confirmation: DF.Check
 		is_active: DF.Check
 		override_status: DF.Check
 		send_email_alert: DF.Check
@@ -39,6 +40,9 @@ class Workflow(Document):
 	def on_update(self):
 		self.create_custom_field_for_workflow_state()
 		self.update_default_workflow_status()
+
+	def on_trash(self):
+		frappe.clear_cache(doctype=self.document_type)
 
 	def create_custom_field_for_workflow_state(self):
 		frappe.clear_cache(doctype=self.document_type)
@@ -68,17 +72,18 @@ class Workflow(Document):
 	def update_default_workflow_status(self):
 		docstatus_map = {}
 		states = self.get("states")
+
+		TargetDocType = frappe.qb.DocType(self.document_type)
+		state_field = getattr(TargetDocType, self.workflow_state_field)
+
 		for d in states:
 			if d.doc_status not in docstatus_map:
-				frappe.db.sql(
-					f"""
-					UPDATE `tab{self.document_type}`
-					SET `{self.workflow_state_field}` = %s
-					WHERE ifnull(`{self.workflow_state_field}`, '') = ''
-					AND `docstatus` = %s
-				""",
-					(d.state, d.doc_status),
-				)
+				(
+					frappe.qb.update(TargetDocType)
+					.set(state_field, d.state)
+					.where(state_field.isnull() | (state_field == ""))
+					.where(TargetDocType.docstatus == d.doc_status)
+				).run()
 
 				docstatus_map[d.doc_status] = d.state
 
@@ -90,38 +95,54 @@ class Workflow(Document):
 
 			frappe.throw(frappe._("{0} not a valid State").format(state))
 
+		meta = frappe.get_meta(self.document_type)
+		is_submittable = meta.is_submittable
+
+		if not is_submittable:
+			for state in self.states:
+				if cint(state.doc_status) != 0:
+					frappe.throw(
+						frappe._(
+							"Workflow State '{0}' has Document Status {1}, but DocType '{2}' is not submittable. "
+							"Only Document Status 0 (Draft) is allowed for non-submittable DocTypes."
+						).format(state.state, state.doc_status, self.document_type)
+					)
+
 		for t in self.transitions:
 			state = get_state(t.state)
 			next_state = get_state(t.next_state)
+			state_docstatus = cint(state.doc_status)
+			next_state_docstatus = cint(next_state.doc_status)
 
-			if state.doc_status == "2":
+			if state_docstatus == 2:
 				frappe.throw(
 					frappe._("Cannot change state of Cancelled Document. Transition row {0}").format(t.idx)
 				)
 
-			if state.doc_status == "1" and next_state.doc_status == "0":
+			if state_docstatus == 1 and next_state_docstatus == 0:
 				frappe.throw(
 					frappe._(
 						"Submitted Document cannot be converted back to draft. Transition row {0}"
 					).format(t.idx)
 				)
 
-			if state.doc_status == "0" and next_state.doc_status == "2":
+			if state_docstatus == 0 and next_state_docstatus == 2:
 				frappe.throw(frappe._("Cannot cancel before submitting. See Transition {0}").format(t.idx))
 
 	def set_active(self):
 		if cint(self.is_active):
-			# clear all other
-			frappe.db.sql(
-				"""UPDATE `tabWorkflow` SET `is_active`=0
-				WHERE `document_type`=%s""",
-				self.document_type,
-			)
+			Workflow = frappe.qb.DocType("Workflow")
+			(
+				frappe.qb.update(Workflow)
+				.set(Workflow.is_active, 0)
+				.where(Workflow.document_type == self.document_type)
+			).run()
 
 
 @frappe.whitelist()
-def get_workflow_state_count(doctype, workflow_state_field, states):
+def get_workflow_state_count(doctype: str, workflow_state_field: str, states: str | list[str]):
 	frappe.has_permission(doctype=doctype, ptype="read", throw=True)
+	frappe.has_permission(doctype="Workflow", ptype="write", throw=True)
 	states = frappe.parse_json(states)
 
 	if workflow_state_field in frappe.get_meta(doctype).get_valid_columns():

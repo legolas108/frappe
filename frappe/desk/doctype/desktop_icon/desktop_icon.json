@@ -4,6 +4,7 @@
  "allow_rename": 1,
  "autoname": "field:label",
  "creation": "2016-02-22 03:47:45.387068",
+ "deprecated": 1,
  "doctype": "DocType",
  "engine": "InnoDB",
  "field_order": [
@@ -147,11 +148,11 @@
    "fieldname": "bg_color",
    "fieldtype": "Select",
    "label": "Background Color",
-   "options": "blue\ngray"
+   "options": "gray\nblue"
   }
  ],
  "links": [],
- "modified": "2026-01-27 18:17:48.667070",
+ "modified": "2026-07-30 13:29:53.139874",
  "modified_by": "Administrator",
  "module": "Desk",
  "name": "Desktop Icon",

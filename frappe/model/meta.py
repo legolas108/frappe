@@ -18,9 +18,7 @@ Example:
 import json
 import os
 import typing
-from datetime import datetime
-
-import click
+from datetime import datetime, timedelta
 
 import frappe
 from frappe import _, _lt
@@ -32,18 +30,17 @@ from frappe.model import (
 	optional_fields,
 	table_fields,
 )
-from frappe.model.base_document import (
+from frappe.model.document import (
 	DOCTYPE_TABLE_FIELDS,
 	TABLE_DOCTYPES_FOR_DOCTYPE,
-	BaseDocument,
+	Document,
 )
-from frappe.model.document import Document
 from frappe.model.utils import is_single_doctype
 from frappe.model.workflow import get_workflow_name
 from frappe.modules import load_doctype_module
 from frappe.utils import cached_property, cast, cint, cstr
 from frappe.utils.caching import site_cache
-from frappe.utils.data import add_to_date, get_datetime
+from frappe.utils.data import add_to_date, get_currency_precision, get_datetime
 
 ListOrTuple = list | tuple
 SerializableTypes = str | int | float | datetime
@@ -58,7 +55,6 @@ DEFAULT_FIELD_LABELS = {
 	"owner": _lt("Created By"),
 	"_user_tags": _lt("Tags"),
 	"_liked_by": _lt("Liked By"),
-	"_comments": _lt("Comments"),
 	"_assign": _lt("Assigned To"),
 }
 
@@ -120,9 +116,9 @@ def load_doctype_from_file(doctype):
 	for d in txt.get("permissions", []):
 		d["doctype"] = "DocPerm"
 
-	txt["fields"] = [BaseDocument(d) for d in txt["fields"]]
+	txt["fields"] = [Document(d) for d in txt["fields"]]
 	if "permissions" in txt:
-		txt["permissions"] = [BaseDocument(d) for d in txt["permissions"]]
+		txt["permissions"] = [Document(d) for d in txt["permissions"]]
 
 	return txt
 
@@ -196,20 +192,19 @@ class Meta(Document):
 	def get_dynamic_link_fields(self):
 		return self._dynamic_link_fields
 
-	def get_masked_fields(self):
+	def get_masked_fields(self, parenttype=None):
 		import copy
 
 		if frappe.session.user == "Administrator":
 			return []
-		cache_key = f"masked_fields::{self.name}::{frappe.session.user}"
+		cache_key = f"masked_fields::{self.name}::{parenttype or ''}::{frappe.session.user}"
 		masked_fields = frappe.cache.get_value(cache_key)
 
 		if masked_fields is None:
 			masked_fields = []
+			permlevel_access = set(self.get_permlevel_access("mask", parenttype))
 			for df in self.fields:
-				if df.get("mask") and not self.has_permlevel_access_to(
-					fieldname=df.fieldname, df=df, permission_type="mask"
-				):
+				if df.get("mask") and df.permlevel not in permlevel_access:
 					# work on a copy instead of original df
 					df_copy = copy.deepcopy(df)
 					df_copy.mask_readonly = 1
@@ -264,7 +259,8 @@ class Meta(Document):
 	def _valid_columns(self):
 		table_exists = frappe.db.table_exists(self.name)
 		if self.name in self.special_doctypes and table_exists:
-			valid_columns = get_table_columns(self.name)
+			# `_comments` is a cache column, never a readable field
+			valid_columns = [c for c in get_table_columns(self.name) if c != "_comments"]
 		else:
 			valid_columns = self.default_fields + [
 				df.fieldname
@@ -311,6 +307,13 @@ class Meta(Document):
 			return str(DEFAULT_FIELD_LABELS[fieldname])
 
 		return "No Label"
+
+	def get_translated_label(self, fieldname):
+		"""Return the translated label of the given fieldname."""
+		if fieldname in DEFAULT_FIELD_LABELS:
+			return str(DEFAULT_FIELD_LABELS[fieldname])
+
+		return _(self.get_label(fieldname), context=self.name)
 
 	def get_options(self, fieldname):
 		return self.get_field(fieldname).options
@@ -502,8 +505,8 @@ class Meta(Document):
 			recent_change = frappe.db.sql(
 				f"SELECT `creation` FROM `tab{self.name}` ORDER BY `creation` DESC LIMIT 1"
 			)  # nosemgrep
-			if recent_change and get_datetime(recent_change[0][0]) > add_to_date(
-				None, days=-1 * LARGE_TABLE_RECENCY_THRESHOLD
+			if recent_change and get_datetime(recent_change[0][0]) > (
+				datetime.now() + timedelta(days=(-1 * LARGE_TABLE_RECENCY_THRESHOLD))
 			):
 				self.is_large_table = True
 
@@ -603,6 +606,13 @@ class Meta(Document):
 							# Break out to add this just after the last field
 							break
 						target_position = current_field
+				elif field.fieldtype == "Tab Break" and target_position in field_order:
+					# Find the next tab break and set target_position to just one field before,
+					# so the new tab is appended after the current tab instead of splitting it
+					for current_field in field_order[field_order.index(target_position) + 1 :]:
+						if self._fields[current_field].fieldtype == "Tab Break":
+							break
+						target_position = current_field
 				insertion_map.setdefault(target_position, []).append(field.fieldname)
 
 			else:
@@ -672,7 +682,7 @@ class Meta(Document):
 
 	@cached_property
 	def high_permlevel_fields(self):
-		return [df for df in self.fields if df.permlevel > 0]
+		return [df for df in self.fields if (df.permlevel or 0) > 0]
 
 	def get_permitted_fieldnames(
 		self,
@@ -705,7 +715,8 @@ class Meta(Document):
 		)
 
 		if 0 not in permlevel_access and permission_type in ("read", "select"):
-			if frappe.share.get_shared(self.name, user, rights=["read"], limit=1):
+			check_doctype = parenttype if self.istable and parenttype else self.name
+			if frappe.share.get_shared(check_doctype, user, rights=["read"], limit=1):
 				permlevel_access.add(0)
 
 		permitted_fieldnames.extend(
@@ -793,11 +804,21 @@ class Meta(Document):
 						group.get("items").append(doctype)
 					link.added = True
 
+					# Add fieldname to transaction group for external links
+					if not link.is_child_table:
+						if "fieldnames" not in group:
+							group["fieldnames"] = {}
+						group["fieldnames"][link.link_doctype] = link.link_fieldname
+
 			if not link.added:
 				# group not found, make a new group
-				data.transactions.append(
-					dict(label=link.group, items=[link.parent_doctype or link.link_doctype])
-				)
+				new_group = dict(label=link.group, items=[link.parent_doctype or link.link_doctype])
+
+				# Add fieldname to new transaction group for external links
+				if not link.is_child_table:
+					new_group["fieldnames"] = {link.link_doctype: link.link_fieldname}
+
+				data.transactions.append(new_group)
 
 			if not data.fieldname and link.link_fieldname:
 				data.fieldname = link.link_fieldname
@@ -884,6 +905,12 @@ def get_field_currency(df, doc=None):
 					if frappe.get_meta(doc.parenttype).has_field(df.get("options")):
 						# only get_value if parent has currency field
 						currency = frappe.db.get_value(doc.parenttype, doc.parent, df.get("options"))
+						if not currency:
+							# Parent may not be in DB yet (new document being saved).
+							# Use the in-memory parent document reference if available.
+							parent = getattr(doc, "parent_doc", None)
+							if parent:
+								currency = parent.get(df.get("options"))
 
 		if currency:
 			frappe.local.field_currency.setdefault((doc.doctype, ref_docname), frappe._dict()).setdefault(
@@ -901,8 +928,10 @@ def get_field_precision(df, doc=None, currency=None):
 		precision = cint(df.precision)
 
 	elif df.fieldtype == "Currency":
-		precision = cint(frappe.db.get_default("currency_precision"))
-		if not precision:
+		currency_precision = get_currency_precision()
+		if currency_precision is not None:
+			precision = currency_precision
+		else:
 			precision = get_precision_from_currency_format(currency or get_field_currency(df, doc))
 	else:
 		precision = cint(frappe.db.get_default("float_precision")) or 3
@@ -943,6 +972,8 @@ def trim_tables(doctype=None, dry_run=False, quiet=False):
 	as maintenance since removing a field in a DocType doesn't automatically
 	delete the db field.
 	"""
+	import click
+
 	UPDATED_TABLES = {}
 	filters = {"issingle": 0, "is_virtual": 0}
 	if doctype:
@@ -972,11 +1003,17 @@ def trim_table(doctype, dry_run=True):
 	ignore_fields = default_fields + optional_fields + child_table_fields
 	columns = frappe.db.get_table_columns(doctype)
 	fields = frappe.get_meta(doctype, cached=False).get_fieldnames_with_value()
+	# docfields never get generated columns, so the controller owns these
+	generated_columns = {
+		column.name
+		for column in frappe.db.get_table_columns_description(f"tab{doctype}")
+		if column.is_generated
+	}
 
 	def is_internal(field):
 		return field not in ignore_fields and not field.startswith("_")
 
-	columns_to_remove = [f for f in list(set(columns) - set(fields)) if is_internal(f)]
+	columns_to_remove = [f for f in list(set(columns) - set(fields) - generated_columns) if is_internal(f)]
 	DROPPED_COLUMNS = columns_to_remove[:]
 
 	if columns_to_remove and not dry_run:
@@ -1015,14 +1052,14 @@ CACHE_PROPERTIES = frozenset(prop for prop, value in vars(Meta).items() if isins
 
 
 def _serialize(doc, no_nulls=False, *, is_child=False):
-	out = {}
+	out = frappe._dict()
 	for key, value in doc.__dict__.items():
 		if not is_child:
 			if key in CACHE_PROPERTIES:
 				continue
 
 			if isinstance(value, ListOrTuple):
-				if value and isinstance(value[0], BaseDocument):
+				if value and isinstance(value[0], Document):
 					out[key] = [_serialize(d, no_nulls=no_nulls, is_child=True) for d in value]
 
 				continue

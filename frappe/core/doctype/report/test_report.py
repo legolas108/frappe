@@ -42,6 +42,27 @@ class TestReport(IntegrationTestCase):
 		self.assertEqual(columns[1].get("label"), "Module")
 		self.assertTrue("User" in [d.get("name") for d in data])
 
+	def test_failed_query_report_leaves_connection_writable(self):
+		"""A failing query must not strand the connection in the read only transaction."""
+		report = frappe.get_doc(
+			{
+				"doctype": "Report",
+				"report_name": frappe.generate_hash(),
+				"ref_doctype": "ToDo",
+				"report_type": "Query Report",
+				"is_standard": "No",
+				"query": "select * from `tabNoSuchTable`",
+			}
+		).insert()
+		self.addCleanup(report.delete)
+
+		with self.assertRaises(Exception):
+			report.execute_query_report({})
+
+		# the assertion: this insert raises InReadOnlyMode if the transaction is still open
+		todo = frappe.get_doc({"doctype": "ToDo", "description": frappe.generate_hash()}).insert()
+		self.addCleanup(todo.delete)
+
 	def test_save_or_delete_report(self):
 		"""Test for validations when editing / deleting report of type Report Builder"""
 
@@ -436,3 +457,186 @@ result = [
 			self.assertGreaterEqual(len(rows), 1)
 		elif frappe.db.db_type == "postgres":
 			self.assertRaises(frappe.PermissionError, report.execute_query_report, filters={})
+
+	def test_report_cache_invalidation(self):
+		import frappe.sessions
+		from frappe.utils import set_request
+
+		frappe.set_user("test@example.com")
+		set_request(method="GET", path="/app")
+
+		try:
+			frappe.sessions.get()
+
+			report_name = _save_report(
+				"Test Cache Invalidation Report",
+				"User",
+				json.dumps([{"fieldname": "email", "fieldtype": "Data", "label": "Email"}]),
+			)
+
+			cached_bootinfo = frappe.sessions.get()
+			self.assertIn(report_name, cached_bootinfo["allowed_reports"])
+
+			doc = frappe.get_doc("Report", report_name)
+			delete_report(doc.name)
+
+			cached_bootinfo = frappe.sessions.get()
+			self.assertNotIn(report_name, cached_bootinfo["allowed_reports"])
+
+		finally:
+			frappe.local.request = None
+			frappe.set_user("Administrator")
+
+	def test_save_report_group_by_validation(self):
+		"""save_report rejects invalid group_by settings and accepts valid ones"""
+
+		def _settings(group_by):
+			return json.dumps(
+				{
+					"filters": [],
+					"fields": [["user_type", "User"], ["_aggregate_column", "User"]],
+					"order_by": "_aggregate_column desc",
+					"group_by": group_by,
+				}
+			)
+
+		# invalid
+
+		with self.assertRaises(frappe.DataError):
+			_save_report(
+				"Test Invalid 1",
+				"User",
+				_settings(
+					{
+						"group_by": "`tabUser`.`user_type`",
+						"aggregate_function": "avg",
+						"aggregate_on": "length(name)",
+					}
+				),
+			)
+
+		with self.assertRaises(frappe.DataError):
+			_save_report(
+				"Test Invalid 2",
+				"User",
+				_settings(
+					{
+						"group_by": "length(name)",
+						"aggregate_function": "avg",
+						"aggregate_on": "`tabUser`.`name`",
+					}
+				),
+			)
+
+		with self.assertRaises(frappe.DataError):
+			_save_report(
+				"Test Invalid 3",
+				"User",
+				_settings(
+					{
+						"group_by": "`tabUser`.`user_type`",
+						"aggregate_function": "SLEEP(5)",
+						"aggregate_on": "`tabUser`.`name`",
+					}
+				),
+			)
+
+		with self.assertRaises(frappe.DataError):
+			_save_report(
+				"Test Invalid 4",
+				"User",
+				_settings(
+					{
+						"group_by": "`tabUser`.`user_type`",
+						"aggregate_function": "sum",
+						"aggregate_on": "`tabUser`.`nonexistent_field`",
+					}
+				),
+			)
+
+		with self.assertRaises(frappe.DataError):
+			_save_report(
+				"Test Invalid 5",
+				"User",
+				_settings(
+					{
+						"group_by": "`tabFakeDoctype`.`name`",
+						"aggregate_function": "count",
+					}
+				),
+			)
+
+		with self.assertRaises(frappe.DataError):
+			_save_report(
+				"Test Invalid 6",
+				"User",
+				_settings(
+					{
+						"group_by": "`tabUser`.`user_type`",
+						"aggregate_function": ["sum"],
+						"aggregate_on": "`tabUser`.`name`",
+					}
+				),
+			)
+
+		with self.assertRaises(frappe.DataError):
+			_save_report(
+				"Test Invalid 7",
+				"User",
+				_settings(
+					{
+						"group_by": "`tabUser`.`user_type`",
+						"aggregate_function": None,
+						"aggregate_on": "`tabUser`.`name`",
+					}
+				),
+			)
+
+		# valid cases
+
+		try:
+			report_name = _save_report(
+				"Test Valid 1",
+				"User",
+				_settings(
+					{
+						"group_by": "`tabUser`.`user_type`",
+						"aggregate_function": "avg",
+						"aggregate_on": "`tabUser`.`name`",
+					}
+				),
+			)
+			self.assertTrue(frappe.db.exists("Report", report_name))
+
+			_save_report(
+				report_name,
+				"User",
+				_settings(
+					{
+						"group_by": "`tabUser`.`user_type`",
+						"aggregate_function": "sum",
+						"aggregate_on": "`tabUser`.`name`",
+					}
+				),
+			)
+
+			_save_report(
+				report_name,
+				"User",
+				_settings(
+					{
+						"group_by": "`tabUser`.`user_type`",
+						"aggregate_function": "count",
+					}
+				),
+			)
+
+			list_report_name = _save_report(
+				"Test Valid 2",
+				"User",
+				json.dumps([{"fieldname": "email", "fieldtype": "Data", "label": "Email"}]),
+			)
+			self.assertTrue(frappe.db.exists("Report", list_report_name))
+
+		finally:
+			frappe.db.rollback()

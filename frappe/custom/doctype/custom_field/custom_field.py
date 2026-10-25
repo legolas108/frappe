@@ -22,9 +22,10 @@ class CustomField(Document):
 	if TYPE_CHECKING:
 		from frappe.types import DF
 
+		alignment: DF.Literal["", "Left", "Center", "Right"]
+		allow_bulk_edit: DF.Check
 		allow_in_quick_entry: DF.Check
 		allow_on_submit: DF.Check
-		alignment: DF.Literal["", "Left", "Center", "Right"]
 		bold: DF.Check
 		button_color: DF.Literal["", "Default", "Primary", "Info", "Success", "Warning", "Danger"]
 		collapsible: DF.Check
@@ -41,6 +42,7 @@ class CustomField(Document):
 			"Autocomplete",
 			"Attach",
 			"Attach Image",
+			"Attachment Gallery",
 			"Barcode",
 			"Button",
 			"Check",
@@ -99,6 +101,7 @@ class CustomField(Document):
 		length: DF.Int
 		link_filters: DF.JSON | None
 		mandatory_depends_on: DF.Code | None
+		mask: DF.Check
 		module: DF.Link | None
 		no_copy: DF.Check
 		non_negative: DF.Check
@@ -114,6 +117,7 @@ class CustomField(Document):
 		report_hide: DF.Check
 		reqd: DF.Check
 		search_index: DF.Check
+		set_only_once: DF.Check
 		show_dashboard: DF.Check
 		sort_options: DF.Check
 		translatable: DF.Check
@@ -192,7 +196,9 @@ class CustomField(Document):
 			and not CustomizeForm.allow_fieldtype_change(old_fieldtype, self.fieldtype)
 		):
 			frappe.throw(
-				_("Fieldtype cannot be changed from {0} to {1}").format(old_fieldtype, self.fieldtype)
+				_("Fieldtype of {0} in {1} cannot be changed from {2} to {3}").format(
+					frappe.bold(self.fieldname), self.dt, old_fieldtype, self.fieldtype
+				)
 			)
 
 		if not self.fieldname:
@@ -269,7 +275,7 @@ class CustomField(Document):
 
 
 @frappe.whitelist()
-def get_fields_label(doctype=None):
+def get_fields_label(doctype: str | None = None):
 	meta = frappe.get_meta(doctype)
 
 	if doctype in core_doctypes_list:
@@ -395,7 +401,7 @@ def get_existing_custom_fields(custom_fields):
 	return {(field.dt, field.fieldname): field for field in existing_fields}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def rename_fieldname(custom_field: str, fieldname: str):
 	frappe.only_for("System Manager")
 
@@ -442,3 +448,53 @@ def _update_fieldname_references(field: CustomField, old_fieldname: str, new_fie
 		"insert_after",
 		new_fieldname,
 	)
+
+
+def delete_custom_fields(custom_fields: dict, bypass_hooks: bool = False):
+	"""
+	Delete custom fields from doctypes.
+
+	:param custom_fields: Dict mapping doctype to field names.
+	:param bypass_hooks: If `True`, fast raw delete (skips hooks (doc events like on_trash)).
+
+	Example:
+
+	```
+	delete_custom_fields({"Address": ["custom_a", "custom_b"]})
+
+	delete_custom_fields({"ToDo": [{"fieldname": "cf_1"}]}, bypass_hooks=True)
+	````
+	"""
+	for doctype, fields in custom_fields.items():
+		fieldnames = []
+
+		if isinstance(fields, (list, tuple, set)):
+			for field in fields:
+				if isinstance(field, str):
+					fieldnames.append(field)
+				elif isinstance(field, dict) and field.get("fieldname"):
+					fieldnames.append(field["fieldname"])
+
+		if not fieldnames:
+			continue
+
+		fieldnames = tuple(set(fieldnames))
+
+		if bypass_hooks:
+			frappe.db.delete(
+				"Custom Field",
+				{
+					"fieldname": ("in", fieldnames),
+					"dt": doctype,
+				},
+			)
+			frappe.clear_cache(doctype=doctype)
+		else:
+			custom_field_names = frappe.get_all(
+				"Custom Field",
+				filters={"fieldname": ("in", fieldnames), "dt": doctype},
+				pluck="name",
+			)
+
+			for custom_field_name in custom_field_names:
+				frappe.get_doc("Custom Field", custom_field_name).delete(ignore_permissions=True, force=True)

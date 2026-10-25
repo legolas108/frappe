@@ -6,15 +6,18 @@ from frappe.tests import IntegrationTestCase
 from frappe.utils import set_request
 from frappe.website.page_renderers.static_page import StaticPage
 from frappe.website.serve import get_response, get_response_content
-from frappe.website.utils import build_response, clear_website_cache, get_home_page
+from frappe.website.utils import build_response, clear_website_cache, get_boot_data, get_home_page
 
 
 class TestWebsite(IntegrationTestCase):
 	def setUp(self):
 		frappe.set_user("Guest")
 		self._clearRequest()
+		self._developer_mode = frappe.conf.developer_mode
+		frappe.conf.developer_mode = 1
 
 	def tearDown(self):
+		frappe.conf.developer_mode = self._developer_mode
 		frappe.db.delete("Access Log")
 		frappe.set_user("Administrator")
 		self._clearRequest()
@@ -238,6 +241,21 @@ class TestWebsite(IntegrationTestCase):
 		delattr(frappe.hooks, "website_redirects")
 		frappe.client_cache.delete_value("app_hooks")
 
+	def test_redirect_with_query_string_after_bare_path(self):
+		self.addCleanup(frappe.cache.hdel, "website_redirects", "courses/course")
+		redirects = [
+			dict(source=r"/courses/course\?course=(.*)", target=r"/courses/\1", match_with_query_string=True)
+		]
+
+		with self.patch_hooks({"website_redirects": redirects}):
+			set_request(method="GET", path="/courses/course")
+			get_response()
+			set_request(method="GET", path="/courses/course?course=data")
+			response = get_response()
+
+		self.assertEqual(response.status_code, 301)
+		self.assertEqual(response.headers.get("Location"), "/courses/data")
+
 	def test_custom_page_renderer(self):
 		from frappe import get_hooks
 
@@ -265,6 +283,7 @@ class TestWebsite(IntegrationTestCase):
 		content = get_response_content("/Language/ru")
 		self.assertIn('<div class="print-format">', content)
 		self.assertIn("<div>Language</div>", content)
+		self.assertNotIn("&no_letterhead=None", content)
 
 	def test_custom_base_template_path(self):
 		content = get_response_content("/_test/_test_folder/_test_page")
@@ -292,6 +311,19 @@ class TestWebsite(IntegrationTestCase):
 
 		# assert template block rendered
 		self.assertIn("<p>Test content</p>", content)
+
+	def test_boot_data_number_settings(self):
+		with self.change_settings(
+			"System Settings",
+			currency_precision=3,
+			float_precision=4,
+			rounding_method="Commercial Rounding",
+		):
+			sysdefaults = get_boot_data()["sysdefaults"]
+
+		self.assertEqual(sysdefaults["currency_precision"], 3)
+		self.assertEqual(sysdefaults["float_precision"], 4)
+		self.assertEqual(sysdefaults["rounding_method"], "Commercial Rounding")
 
 	def test_index_and_next_comment(self):
 		content = get_response_content("/_test/_test_folder")

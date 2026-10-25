@@ -48,6 +48,7 @@ def update_nsm(doc):
 	if hasattr(doc, "nsm_oldparent_field"):
 		old_parent_field = doc.nsm_oldparent_field
 
+	restore_nsm_fields(doc, old_parent_field)
 	parent, old_parent = doc.get(parent_field) or None, doc.get(old_parent_field) or None
 
 	# has parent changed (?) or parent is None (root)
@@ -62,6 +63,18 @@ def update_nsm(doc):
 	frappe.clear_document_cache(doc.doctype)
 
 	doc.reload()
+
+
+def restore_nsm_fields(doc, old_parent_field):
+	"""Replace lft, rgt and old parent sent by the client with the saved values."""
+	if doc.flags.in_insert:
+		saved = frappe._dict(lft=0, rgt=0)
+	elif not (saved := doc.get_doc_before_save()):
+		return  # not a save, e.g. on_trash
+
+	doc.lft, doc.rgt = saved.lft, saved.rgt
+	doc.set(old_parent_field, saved.get(old_parent_field))
+	frappe.db.set_value(doc.doctype, doc.name, {"lft": doc.lft, "rgt": doc.rgt}, update_modified=False)
 
 
 def update_add_node(doc, parent, parent_field):
@@ -165,12 +178,14 @@ def update_move_node(doc: Document, parent_field: str):
 
 
 @frappe.whitelist()
+def rebuild_tree_for_doctype(doctype: str) -> None:
+	"""Rebuild the nested set of a tree doctype on request."""
+	frappe.only_for("System Manager")
+	rebuild_tree(doctype)
+
+
 def rebuild_tree(doctype: str) -> None:
 	"""Call rebuild_node for all root nodes."""
-	# Check for perm if called from client-side
-	if frappe.request and frappe.local.form_dict.cmd == "rebuild_tree":
-		frappe.only_for("System Manager")
-
 	meta = frappe.get_meta(doctype)
 	if not meta.has_field("lft") or not meta.has_field("rgt"):
 		frappe.throw(
@@ -210,10 +225,14 @@ def rebuild_node(doctype, parent, left, parent_field):
 	table = DocType(doctype)
 	column = getattr(table, parent_field)
 
-	result = (frappe.qb.from_(table).where(column == parent).select(table.name)).run()
+	children = (
+		(frappe.qb.from_(table).where(column == parent).select(table.name))
+		.orderby(table.name, order=Order.asc)
+		.run(pluck=True)
+	)
 
-	for r in result:
-		right = rebuild_node(doctype, r[0], right, parent_field)
+	for child in children:
+		right = rebuild_node(doctype, child, right, parent_field)
 
 	# we've got the left value, and now that we've processed
 	# the children of this node we also know the right value

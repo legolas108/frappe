@@ -61,16 +61,14 @@ let docfield_df = computed(() => {
 				df.options = ["", "Email", "Name", "Phone", "URL", "Barcode", "IBAN"];
 			}
 
-			if (store.form.selected_field.fieldtype === "Select") {
-				df.description = __("Enter list of Options, each on a new line.");
-			} else {
-				df.description = "";
-			}
-		}
-
-		// show link_filters docfield only when link field is selected
-		if (df.fieldname === "link_filters" && store.form.selected_field.fieldtype !== "Link") {
-			return false;
+			const FIELD_DESCRIPTIONS = {
+				Select: __("Enter list of Options, each on a new line."),
+				Currency: __(
+					"Enter the fieldname of the currency field or a cached value (e.g. Company:company:default_currency)."
+				),
+			};
+			const fieldtype = store.form.selected_field?.fieldtype;
+			df.description = FIELD_DESCRIPTIONS[fieldtype] || "";
 		}
 
 		if (search_text.value) {
@@ -96,7 +94,7 @@ let docfield_df = computed(() => {
 			:title="__('Close properties')"
 			@click="store.form.selected_field = null"
 		>
-			<div v-html="frappe.utils.icon('remove', 'sm')"></div>
+			<div v-html="frappe.utils.icon('x', 'sm')"></div>
 		</button>
 	</div>
 	<div class="control-data">

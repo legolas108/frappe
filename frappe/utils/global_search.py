@@ -8,7 +8,7 @@ import re
 import redis
 
 import frappe
-from frappe.model.base_document import get_controller
+from frappe.model.document import get_controller
 from frappe.utils import cint, strip_html_tags
 from frappe.utils.data import cstr
 from frappe.utils.html_utils import unescape_html
@@ -477,7 +477,7 @@ def delete_for_document(doc):
 
 
 @frappe.whitelist()
-def search(text, start=0, limit=20, doctype=""):
+def search(text: str, start: int = 0, limit: int = 20, doctype: str = ""):
 	"""
 	Search for given text in __global_search
 	:param text: phrase to be searched
@@ -530,14 +530,15 @@ def search(text, start=0, limit=20, doctype=""):
 			if r.doctype == doctype and r.rank > 0.0:
 				try:
 					meta = frappe.get_meta(r.doctype)
+					doc = frappe.get_lazy_doc(r.doctype, r.name)
 					if meta.image_field:
-						r.image = frappe.db.get_value(r.doctype, r.name, meta.image_field)
+						r.image = doc.get(meta.image_field)
 					if meta.title_field:
-						r.title = frappe.db.get_value(r.doctype, r.name, meta.title_field)
+						r.title = doc.get(meta.title_field)
+					if frappe.has_permission(r.doctype, doc=doc):
+						sorted_results.append(r)
 				except Exception:
 					frappe.clear_messages()
-
-				sorted_results.extend([r])
 
 	return sorted_results
 

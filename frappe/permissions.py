@@ -54,7 +54,8 @@ def print_has_permission_check_logs(func):
 		# print only if access denied
 		# and if user is checking their own permission
 		if not result and self_perm_check and print_logs:
-			msgprint(("<br>").join(frappe.flags.get("has_permission_check_logs", [])))
+			if logs := frappe.flags.get("has_permission_check_logs"):
+				msgprint(("<br>").join(logs))
 
 		if print_logs:
 			frappe.flags.pop("has_permission_check_logs", None)
@@ -143,12 +144,13 @@ def has_permission(
 			debug and _debug_log(
 				"Permission check failed from role permission system. Check if user's role grant them permission to the document."
 			)
-			msg = _("User {0} does not have access to this document").format(frappe.bold(user))
-			if meta.issingle:
-				msg += f": {_(doc.doctype)}"
-			elif has_permission(doc.doctype):
-				msg += f": {_(doc.doctype)} - {doc.name}"
-			push_perm_check_log(msg, debug=debug)
+			if not frappe.flags.get("has_permission_check_logs"):
+				msg = _("User {0} does not have access to this document").format(frappe.bold(user))
+				if meta.issingle:
+					msg += f": {_(doc.doctype)}"
+				elif has_permission(doc.doctype, print_logs=False):
+					msg += f": {_(doc.doctype)} - {doc.name}"
+				push_perm_check_log(msg, debug=debug)
 	else:
 		if ptype == "submit" and not cint(meta.is_submittable):
 			push_perm_check_log(_("Document Type is not submittable"), debug=debug)
@@ -207,6 +209,19 @@ def has_permission(
 	if not perm and not ignore_share_permissions:
 		debug and _debug_log("Checking if document/doctype is explicitly shared with user")
 		perm = false_if_not_shared()
+
+	# select permission is implied by read permission
+	if not perm and ptype == "select":
+		perm = has_permission(
+			doctype,
+			ptype="read",
+			doc=doc,
+			user=user,
+			parent_doctype=parent_doctype,
+			print_logs=print_logs,
+			debug=debug,
+			ignore_share_permissions=ignore_share_permissions,
+		)
 
 	return bool(perm)
 
@@ -485,26 +500,31 @@ def has_controller_permissions(doc, ptype, user=None, debug=False) -> bool:
 	return True
 
 
-def get_doctypes_with_read():
-	return list({cstr(p.parent) for p in get_valid_perms() if p.parent and p.read})
+def get_doctypes_with_read(user: str | None = None):
+	return list({cstr(p.parent) for p in get_valid_perms(user=user) if p.parent and p.read})
 
 
-def get_valid_perms(doctype=None, user=None):
+def get_valid_perms(doctype=None, user=None, roles=None):
 	"""Get valid permissions for the current user from DocPerm and Custom DocPerm"""
-	roles = get_roles(user)
+	roles = roles or get_roles(user)
 
-	perms = get_perms_for(roles)
-	custom_perms = get_perms_for(roles, "Custom DocPerm")
+	filters = {}
+	if doctype:
+		filters["parent"] = doctype
+
+	perms = get_perms_for(roles, filters=filters)
+	custom_perms = get_perms_for(roles, "Custom DocPerm", filters=filters)
 
 	doctypes_with_custom_perms = get_doctypes_with_custom_docperms()
-	for p in perms:
-		if p.parent not in doctypes_with_custom_perms:
-			custom_perms.append(p)
+	if doctype and doctype not in doctypes_with_custom_perms:
+		custom_perms.extend(perms)
 
-	if doctype:
-		return [p for p in custom_perms if p.parent == doctype]
-	else:
-		return custom_perms
+	elif not doctype:
+		for p in perms:
+			if p["parent"] not in doctypes_with_custom_perms:
+				custom_perms.append(p)
+
+	return custom_perms
 
 
 def get_all_perms(role):
@@ -562,10 +582,14 @@ def get_doctype_roles(doctype, access_type="read"):
 	return [d.role for d in meta.get("permissions") if d.get(access_type)]
 
 
-def get_perms_for(roles, perm_doctype="DocPerm"):
+def get_perms_for(roles, perm_doctype="DocPerm", filters=None):
 	"""Get perms for given roles"""
-	filters = {"permlevel": 0, "docstatus": 0, "role": ["in", roles]}
-	return frappe.get_all(perm_doctype, fields=["*"], filters=filters)
+	query_filters = {"permlevel": 0, "docstatus": 0, "role": ["in", roles]}
+
+	if filters:
+		query_filters.update(filters)
+
+	return frappe.get_all(perm_doctype, fields=["*"], filters=query_filters)
 
 
 def get_doctypes_with_custom_docperms():
@@ -603,11 +627,13 @@ def add_user_permission(
 		).insert(ignore_permissions=ignore_permissions)
 
 
-def remove_user_permission(doctype, name, user):
+def remove_user_permission(doctype, name, user, ignore_permissions=False):
 	user_permission_name = frappe.db.get_value(
 		"User Permission", dict(user=user, allow=doctype, for_value=name)
 	)
-	frappe.delete_doc("User Permission", user_permission_name, force=True)
+	frappe.delete_doc(
+		"User Permission", user_permission_name, force=True, ignore_permissions=ignore_permissions
+	)
 
 
 def clear_user_permissions_for_doctype(doctype, user=None):
@@ -855,7 +881,11 @@ def has_child_permission(
 			return False
 
 		permlevel = parent_meta.get_field(parentfield).permlevel
-		accessible_permlevels = parent_meta.get_permlevel_access(ptype, user=user)
+		# checking for select == checking for "select or read"
+		# select does not support access of higher permlevel child tables, but read does
+		accessible_permlevels = parent_meta.get_permlevel_access(
+			"read" if ptype == "select" else ptype, user=user
+		)
 		if permlevel > 0 and permlevel not in accessible_permlevels:
 			push_perm_check_log(
 				_("Insufficient Permission Level for {0}").format(frappe.bold(parent_doctype)), debug=debug
@@ -865,10 +895,16 @@ def has_child_permission(
 			)
 			return False
 
+		parent_doc = child_doc.parent_doc if hasattr(child_doc, "parent_doc") else None
+		if parent_doc is None:
+			parent_doc = child_doc.parent
+	else:
+		parent_doc = None
+
 	return has_permission(
 		parent_doctype,
 		ptype=ptype,
-		doc=child_doc and getattr(child_doc, "parent_doc", child_doc.parent),
+		doc=parent_doc,
 		user=user,
 		print_logs=print_logs,
 		debug=debug,
@@ -921,3 +957,10 @@ def _get_parent_and_ancestors(doctype, parent):
 	from frappe.utils.nestedset import get_ancestors_of
 
 	yield from get_ancestors_of(doctype, parent)
+
+
+def check_app_permission():
+	is_system_manager = "System Manager" in frappe.get_roles(frappe.session.user)
+	if is_system_user() and is_system_manager:
+		return True
+	return False

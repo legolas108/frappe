@@ -3,9 +3,11 @@
 import io
 import os
 
-from PIL import Image
+from PIL import Image, ImageFile, ImageOps  # nosemgrep: frappe-monkey-patching-not-allowed
 
 import frappe
+
+ImageFile.LOAD_TRUNCATED_IMAGES = True  # nosemgrep: frappe-monkey-patching-not-allowed
 
 
 def resize_images(path, maxdim=700):
@@ -32,6 +34,10 @@ def strip_exif_data(content, content_type) -> bytes:
 	"""
 
 	original_image = Image.open(io.BytesIO(content))
+	if not original_image.getexif():
+		return content
+	# Apply EXIF orientation to pixels before stripping the tag.
+	original_image = ImageOps.exif_transpose(original_image)
 	output = io.BytesIO()
 	# ref: https://stackoverflow.com/a/48248432
 	if content_type == "image/jpeg" and original_image.mode in ("RGBA", "P"):

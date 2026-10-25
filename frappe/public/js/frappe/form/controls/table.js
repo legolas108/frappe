@@ -15,12 +15,9 @@ frappe.ui.form.ControlTable = class ControlTable extends frappe.ui.form.Control 
 		if (this.frm) {
 			this.frm.grids[this.frm.grids.length] = this;
 		}
-		const me = this;
-		this.$wrapper.on("paste", ":text", (e) => {
+		this.$wrapper.on("paste", ":text", async (e) => {
 			const table_field = this.df.fieldname;
 			const grid = this.grid;
-			const grid_pagination = grid.grid_pagination;
-			const grid_rows = grid.grid_rows;
 			const doctype = grid.doctype;
 			const row_docname = $(e.target).closest(".grid-row").data("name");
 			const in_grid_form = $(e.target).closest(".form-in-grid").length;
@@ -34,16 +31,22 @@ frappe.ui.form.ControlTable = class ControlTable extends frappe.ui.form.Control 
 
 			let pasted_data = frappe.utils.get_clipboard_data(e);
 
-			if (!pasted_data || in_grid_form) return;
+			if (!pasted_data || in_grid_form || !this.frm || !row_docname) return;
 
 			let data = frappe.utils.csv_to_array(pasted_data, "\t");
+			// Excel adds a trailing newline to every copy
+			while (data.length && !data.at(-1).filter(Boolean).length) data.pop();
+			if (!data.length) return;
 
 			if (data.length === 1 && data[0].length === 1) return;
+
+			// an async handler's `return false` does not cancel the native paste
+			e.preventDefault();
 
 			let fieldnames = [];
 			let fieldtypes = [];
 			// for raw data with column header
-			if (this.get_field(data[0][0])) {
+			if (data[0][0] && this.get_field(data[0][0])) {
 				data[0].forEach((column) => {
 					fieldnames.push(this.get_field(column));
 					const df = frappe.meta.get_docfield(doctype, this.get_field(column));
@@ -52,7 +55,8 @@ frappe.ui.form.ControlTable = class ControlTable extends frappe.ui.form.Control 
 				data.shift();
 			} else {
 				// no column header, map to the existing visible columns
-				const visible_columns = grid_rows[0].get_visible_columns();
+				const visible_columns =
+					grid.grid_rows_by_docname[row_docname].get_visible_columns();
 				let target_column_matched = false;
 				visible_columns.forEach((column) => {
 					// consider all columns after the target column.
@@ -70,54 +74,48 @@ frappe.ui.form.ControlTable = class ControlTable extends frappe.ui.form.Control 
 
 			let row_idx = locals[doctype][row_docname].idx;
 			let data_length = data.length;
-			data.forEach((row, i) => {
-				setTimeout(() => {
-					let blank_row = !row.filter(Boolean).length;
-					if (!blank_row) {
-						if (row_idx > this.frm.doc[table_field].length) {
-							this.grid.add_new_row();
-						}
+			const total_rows_needed = row_idx - 1 + data.length;
+			while (this.frm.doc[table_field].length < total_rows_needed) {
+				const before = this.frm.doc[table_field].length;
+				this.grid.add_new_row();
+				if (this.frm.doc[table_field].length === before) break; // cannot_add_rows
+			}
+			for (let i = 0; i < data_length; i++) {
+				const row = data[i];
+				if (!row.filter(Boolean).length) {
+					row_idx++;
+					continue;
+				}
 
-						if (row_idx > 1 && (row_idx - 1) % grid_pagination.page_length === 0) {
-							grid_pagination.go_to_page(grid_pagination.page_index + 1);
+				const doc = this.frm.doc[table_field][row_idx - 1];
+				if (doc) {
+					let row_values = {};
+					row.forEach((value, data_index) => {
+						if (fieldnames[data_index]) {
+							row_values[fieldnames[data_index]] = value_formatter_map[
+								fieldtypes[data_index]
+							]
+								? value_formatter_map[fieldtypes[data_index]](value)
+								: value;
 						}
+					});
 
-						const row_name = grid_rows[row_idx - 1].doc.name;
-						row.forEach((value, data_index) => {
-							if (fieldnames[data_index]) {
-								// format value before setting
-								value = value_formatter_map[fieldtypes[data_index]]
-									? value_formatter_map[fieldtypes[data_index]](value)
-									: value;
-								frappe.model.set_value(
-									doctype,
-									row_name,
-									fieldnames[data_index],
-									value
-								);
-							}
-						});
-						row_idx++;
-						if (data_length >= 10) {
-							let progress = i + 1;
-							frappe.show_progress(
-								__("Processing"),
-								progress,
-								data_length,
-								null,
-								true
-							);
-						}
+					await frappe.model.set_value(doctype, doc.name, row_values);
+
+					if (data_length >= 10) {
+						frappe.show_progress(__("Processing"), i + 1, data_length, null, true);
+						await new Promise((resolve) => setTimeout(resolve, 10));
 					}
-				}, 0);
-			});
-			return false; // Prevent the default handler from running.
+				}
+				row_idx++;
+			}
+			this.grid.refresh();
 		});
 	}
 	get_field(field_name) {
 		let fieldname;
 		field_name = field_name.toLowerCase();
-		this.grid?.meta?.fields.some((field) => {
+		this.grid?.meta?.fields?.some((field) => {
 			if (frappe.model.no_value_type.includes(field.fieldtype)) {
 				return false;
 			}

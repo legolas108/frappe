@@ -1,12 +1,14 @@
 # Copyright (c) 2022, Frappe Technologies Pvt. Ltd. and Contributors
 # License: MIT. See LICENSE
+from datetime import timedelta
 from typing import TYPE_CHECKING
 
 import frappe
 from frappe.core.doctype.communication.communication import Communication, get_emails, parse_email
-from frappe.core.doctype.communication.email import add_attachments, make
+from frappe.core.doctype.communication.email import add_attachments, make, undo_email_send
 from frappe.email.doctype.email_queue.email_queue import EmailQueue
 from frappe.tests import IntegrationTestCase
+from frappe.utils import add_to_date, now_datetime
 
 if TYPE_CHECKING:
 	from frappe.contacts.doctype.contact.contact import Contact
@@ -243,6 +245,38 @@ class TestCommunication(IntegrationTestCase):
 		results = list(parse_email([to, cc, bcc]))
 		self.assertEqual([("A", "Test"), ("Note", "Very important")], results)
 
+	def test_parse_email_keeps_doctype_case(self):
+		results = list(parse_email(["erp+ToDo=TASK-0001@example.org"]))
+		self.assertEqual([("ToDo", "TASK-0001")], results)
+
+	def test_timeline_link_from_doctype_in_address(self):
+		create_email_account()
+
+		todo = frappe.get_doc({"doctype": "ToDo", "description": "Email linking case test"}).insert(
+			ignore_permissions=True
+		)
+		note = frappe.get_doc(
+			{"doctype": "Note", "title": "Email linking case test", "content": "Email linking case test"}
+		).insert(ignore_permissions=True)
+
+		for doctype_in_address, doctype, docname in (
+			("ToDo", "ToDo", todo.name),
+			("note", "Note", note.name),
+		):
+			comm = frappe.get_doc(
+				{
+					"doctype": "Communication",
+					"communication_type": "Communication",
+					"communication_medium": "Email",
+					"content": "Email linking case test",
+					"sender": "sender@example.com",
+					"recipients": f"test_comm+{doctype_in_address}={docname}@example.com",
+				}
+			).insert(ignore_permissions=True)
+
+			self.assertEqual((doctype, docname), (comm.reference_doctype, comm.reference_name))
+			self.assertIn((doctype, docname), [(d.link_doctype, d.link_name) for d in comm.timeline_links])
+
 	def test_get_emails(self):
 		emails = get_emails(
 			[
@@ -287,6 +321,47 @@ class TestCommunication(IntegrationTestCase):
 		self.assertEqual(comm_with_signature.content, comm_without_signature.content)
 		self.assertEqual(comm_with_signature.content.count(signature), 1)
 		self.assertEqual(comm_without_signature.content.count(signature), 1)
+
+	def test_make_validates_letterhead(self):
+		# Non-existent letterhead must be rejected before reaching the PDF renderer.
+		with self.assertRaises(frappe.exceptions.ValidationError):
+			make(letterhead="__nonexistent_lh__")
+
+		# Existing letterhead the current user cannot read must also be rejected.
+		lh = frappe.get_doc({"doctype": "Letter Head", "letter_head_name": "_Test LH Permission"}).insert(
+			ignore_permissions=True
+		)
+		try:
+			frappe.set_user("Guest")
+			with self.assertRaises(frappe.PermissionError):
+				make(letterhead=lh.name)
+		finally:
+			frappe.set_user("Administrator")
+			lh.delete()
+
+	def test_make_without_reference_requires_create_permission(self):
+		user = frappe.get_doc(
+			{
+				"doctype": "User",
+				"email": "comm_make_perm@example.com",
+				"first_name": "Comm Make",
+				"user_type": "Website User",
+			}
+		).insert(ignore_permissions=True)
+		self.addCleanup(user.delete)
+
+		frappe.set_user(user.name)
+		self.addCleanup(frappe.set_user, "Administrator")
+		for args in ({}, {"doctype": "User"}, {"name": "Administrator"}):
+			with self.assertRaises(frappe.PermissionError):
+				make(
+					recipients="recipient@example.com",
+					content="test",
+					subject="test",
+					sender="spoofed@example.com",
+					send_email=1,
+					**args,
+				)
 
 	def test_mark_as_spam(self):
 		frappe.get_doc(
@@ -437,6 +512,79 @@ class TestCommunicationEmailMixin(IntegrationTestCase):
 		attached_file = frappe.get_doc("File", attached_file_name)
 		self.assertEqual(attached_file.file_name, file_name)
 		self.assertEqual(attached_file.get_content(), file_content)
+
+	def test_undo_email_send(self):
+		"""Undo should delete Communication and Email Queue, and return original data."""
+		comm = self.new_communication(recipients=["to@test.com"])
+		comm.sent_or_received = "Sent"
+		comm.save(ignore_permissions=True)
+
+		eq = frappe.get_doc(
+			{
+				"doctype": "Email Queue",
+				"sender": "Test <test@example.com>",
+				"message": "Test message",
+				"status": "Not Sent",
+				"priority": 1,
+				"communication": comm.name,
+				"recipients": [{"recipient": "to@test.com", "status": "Not Sent"}],
+			}
+		).insert(ignore_permissions=True)
+
+		result = undo_email_send(comm.name)
+
+		self.assertFalse(frappe.db.exists("Communication", comm.name))
+		self.assertFalse(frappe.db.exists("Email Queue", eq.name))
+		self.assertFalse(frappe.db.exists("Email Queue Recipient", {"parent": eq.name}))
+		self.assertEqual(result["subject"], comm.subject)
+		self.assertEqual(result["recipients"], comm.recipients)
+
+	def test_undo_email_send_fails_for_different_user(self):
+		"""Undo should fail if the current user is not the owner."""
+		comm = self.new_communication(recipients=["to@test.com"])
+		comm.sent_or_received = "Sent"
+		comm.save(ignore_permissions=True)
+		frappe.db.set_value("Communication", comm.name, "owner", "other@test.com")
+
+		with self.assertRaises(frappe.exceptions.ValidationError):
+			undo_email_send(comm.name)
+
+		self.assertTrue(frappe.db.exists("Communication", comm.name))
+
+	def test_undo_email_send_fails_after_time_window(self):
+		"""Undo should fail if the 10-second window has passed."""
+		comm = self.new_communication(recipients=["to@test.com"])
+		comm.sent_or_received = "Sent"
+		comm.save(ignore_permissions=True)
+
+		with self.freeze_time(add_to_date(now_datetime(), seconds=12)):
+			with self.assertRaises(frappe.exceptions.ValidationError):
+				undo_email_send(comm.name)
+
+		self.assertTrue(frappe.db.exists("Communication", comm.name))
+
+	def test_undo_email_send_fails_if_already_sent(self):
+		"""Undo should fail if Email Queue status is not 'Not Sent'."""
+		comm = self.new_communication(recipients=["to@test.com"])
+		comm.sent_or_received = "Sent"
+		comm.save(ignore_permissions=True)
+
+		frappe.get_doc(
+			{
+				"doctype": "Email Queue",
+				"sender": "Test <test@example.com>",
+				"message": "Test message",
+				"status": "Sent",
+				"priority": 1,
+				"communication": comm.name,
+				"recipients": [{"recipient": "to@test.com", "status": "Sent"}],
+			}
+		).insert(ignore_permissions=True)
+
+		with self.assertRaises(frappe.exceptions.ValidationError):
+			undo_email_send(comm.name)
+
+		self.assertTrue(frappe.db.exists("Communication", comm.name))
 
 
 def create_email_account() -> "EmailAccount":

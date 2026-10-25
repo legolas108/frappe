@@ -9,6 +9,7 @@ from frappe.model.workflow import (
 	WorkflowTransitionError,
 	apply_workflow,
 	get_common_transition_actions,
+	get_workflow_name,
 )
 from frappe.tests import IntegrationTestCase
 from frappe.tests.utils import make_test_records
@@ -72,6 +73,15 @@ class TestWorkflow(IntegrationTestCase):
 		self.workflow.transitions[0].condition = ""
 		self.workflow.save()
 
+	def test_deleting_workflow_clears_cached_name(self):
+		"""A deleted workflow must not stay cached against its document type"""
+		self.assertEqual(get_workflow_name("ToDo"), "Test ToDo")
+
+		frappe.delete_doc("Workflow", "Test ToDo")
+
+		self.assertFalse(get_workflow_name("ToDo"))
+		create_new_todo()
+
 	def test_get_common_transition_actions(self):
 		todo1 = create_new_todo()
 		todo2 = create_new_todo()
@@ -107,18 +117,98 @@ class TestWorkflow(IntegrationTestCase):
 		self.assertEqual(len(workflow_actions), 1)
 		self.assertEqual(workflow_actions[0].status, "Completed")
 
-	def test_if_workflow_set_on_action(self):
-		self.workflow._update_state_docstatus = True
-		self.workflow.states[1].doc_status = 1
-		self.workflow.save()
-		todo = create_new_todo()
-		self.assertEqual(todo.docstatus, 0)
-		todo.submit()
-		self.assertEqual(todo.docstatus, 1)
-		self.assertEqual(todo.workflow_state, "Approved")
+	def add_approver(self):
+		"""Give the workflow a mail recipient other than the document owner."""
+		user = frappe.get_doc("User", "test2@example.com")
+		user.add_roles("Test Approver", "System Manager")
+		self.addCleanup(user.remove_roles, "Test Approver", "System Manager")
 
-		self.workflow.states[1].doc_status = 0
-		self.workflow.save()
+	def test_workflow_action_recreated_when_state_is_re_entered(self):
+		"""A document coming back to a state it already left needs a fresh action and notification."""
+		self.add_approver()
+
+		def open_states():
+			return frappe.get_all(
+				"Workflow Action",
+				filters={"reference_doctype": "ToDo", "reference_name": todo.name, "status": "Open"},
+				pluck="workflow_state",
+			)
+
+		with patch("frappe.sendmail") as sendmail:
+			todo = create_new_todo()
+			self.assertEqual(open_states(), ["Pending"])
+			self.assertTrue(sendmail.called)
+
+			apply_workflow(todo, "Reject")
+			self.assertEqual(open_states(), ["Rejected"])
+
+			sendmail.reset_mock()
+			apply_workflow(todo, "Review")
+			self.assertEqual(open_states(), ["Pending"])
+			self.assertTrue(sendmail.called)
+
+		actions = frappe.get_all(
+			"Workflow Action",
+			filters={"reference_doctype": "ToDo", "reference_name": todo.name, "workflow_state": "Pending"},
+			pluck="status",
+			order_by="creation asc",
+		)
+		self.assertEqual(actions, ["Completed", "Open"])
+
+	def test_workflow_action_not_duplicated_on_resave(self):
+		"""Saving without leaving the state must not create another action or resend the email."""
+		self.add_approver()
+
+		with patch("frappe.sendmail") as sendmail:
+			todo = create_new_todo()
+			sendmail.reset_mock()
+
+			todo.description = "edited " + random_string(10)
+			todo.save()
+
+			self.assertFalse(sendmail.called)
+
+		actions = frappe.get_all(
+			"Workflow Action", filters={"reference_doctype": "ToDo", "reference_name": todo.name}
+		)
+		self.assertEqual(len(actions), 1)
+
+	def test_if_workflow_set_on_action(self):
+		dt = create_new_submittable_doctype()
+		workflow = create_submittable_workflow(dt.name)
+		doc = frappe.get_doc({"doctype": dt.name, "test_field": "test"}).insert()
+
+		workflow._update_state_docstatus = True
+		workflow.states[1].doc_status = 1
+		workflow.save()
+
+		self.assertEqual(doc.docstatus, 0)
+		doc.submit()
+		self.assertEqual(doc.docstatus, 1)
+		self.assertEqual(doc.workflow_state, "Approved")
+
+		workflow.states[1].doc_status = 0
+		workflow.save()
+
+	def test_queued_workflow_action_returns_doc(self):
+		dt = create_new_submittable_doctype()
+		workflow = create_submittable_workflow(dt.name)
+		workflow._update_state_docstatus = True
+		workflow.states[1].doc_status = 1
+		workflow.save()
+		doc = frappe.get_doc({"doctype": dt.name, "test_field": "test"}).insert()
+
+		with (
+			patch.object(doc.meta, "queue_in_background", 1),
+			patch("frappe.utils.scheduler.is_scheduler_inactive", return_value=False),
+		):
+			queued_doc = apply_workflow(doc, "Approve")
+
+		self.assertEqual(queued_doc.name, doc.name)
+		self.assertEqual(queued_doc.workflow_state, "Approved")
+		self.assertTrue(
+			frappe.db.exists("Submission Queue", {"ref_doctype": dt.name, "ref_docname": doc.name})
+		)
 
 	def test_syntax_error_in_transition_rule(self):
 		self.workflow.transitions[0].condition = 'doc.status =! "Closed"'
@@ -180,6 +270,18 @@ class TestWorkflow(IntegrationTestCase):
 
 		with self.assertRaises(frappe.ValidationError):
 			apply_workflow(todo, "Approve")
+
+	def test_get_workflow_state_count_requires_workflow_permission(self):
+		"""Only callers who can configure Workflows may use this, regardless of doctype/field chosen."""
+		from frappe.workflow.doctype.workflow.workflow import get_workflow_state_count
+
+		create_new_todo()
+
+		frappe.set_user("test2@example.com")
+		self.addCleanup(frappe.set_user, "Administrator")
+
+		with self.assertRaises(frappe.PermissionError):
+			get_workflow_state_count(doctype="ToDo", workflow_state_field="workflow_state", states=[])
 
 	# app-defined workflow task tests start here
 	def test_sync_tasks(self, doc=None):
@@ -348,6 +450,61 @@ def create_domain_workflow():
 
 def create_new_todo():
 	return frappe.get_doc(doctype="ToDo", description="workflow " + random_string(10)).insert()
+
+
+def create_new_submittable_doctype():
+	if frappe.db.exists("DocType", "Test Submittable Doc"):
+		return frappe.get_doc("DocType", "Test Submittable Doc")
+
+	return frappe.get_doc(
+		{
+			"doctype": "DocType",
+			"module": "Core",
+			"name": "Test Submittable Doc",
+			"custom": 1,
+			"is_submittable": 1,
+			"fields": [
+				{"label": "Field", "fieldname": "test_field", "fieldtype": "Data"},
+				{
+					"label": "Workflow State",
+					"fieldname": "workflow_state",
+					"fieldtype": "Link",
+					"options": "Workflow State",
+				},
+			],
+			"permissions": [{"role": "System Manager", "read": 1, "write": 1, "submit": 1, "cancel": 1}],
+		}
+	).insert(ignore_if_duplicate=True)
+
+
+def create_submittable_workflow(doctype):
+	if frappe.db.exists("Workflow", "Submittable Workflow"):
+		return frappe.get_doc("Workflow", "Submittable Workflow")
+
+	workflow = frappe.get_doc(
+		{
+			"doctype": "Workflow",
+			"workflow_name": "Submittable Workflow",
+			"document_type": doctype,
+			"workflow_state_field": "workflow_state",
+			"is_active": 1,
+			"states": [
+				{"state": "Pending", "allow_edit": "All"},
+				{"state": "Approved", "allow_edit": "System Manager", "doc_status": 0},
+			],
+			"transitions": [
+				{
+					"state": "Pending",
+					"action": "Approve",
+					"next_state": "Approved",
+					"allowed": "System Manager",
+					"allow_self_approval": 1,
+				}
+			],
+		}
+	).insert(ignore_permissions=True, ignore_if_duplicate=True)
+
+	return workflow
 
 
 def create_new_note(doc):

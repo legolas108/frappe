@@ -8,7 +8,7 @@ import frappe
 from frappe.database.utils import NestedSetHierarchy
 from frappe.model.db_query import get_timespan_date_range
 from frappe.query_builder import Field
-from frappe.query_builder.functions import Coalesce
+from frappe.utils import cstr
 
 
 def like(key: Field, value: str) -> frappe.qb:
@@ -47,6 +47,10 @@ def func_in(key: Field, value: list | tuple) -> frappe.qb:
 	"""
 	if isinstance(value, str):
 		value = value.split(",")
+
+	value = ["" if v is None else v for v in value]
+	if "" in value:
+		return key.isin(value) | key.isnull()
 	return key.isin(value)
 
 
@@ -104,14 +108,14 @@ def func_between(key: Field, value: list | tuple) -> frappe.qb:
 	return key[slice(*value)]
 
 
-def func_is(key, value):
-	"Wrapper for IS"
+def func_is(key, value, empty_value=""):
+	"""Wrapper for IS. `empty_value` also counts as not set; None means only NULL does."""
 
-	match value.lower():
+	match cstr(value).lower():
 		case "set":
-			return key != ""
+			return key.isnotnull() if empty_value is None else key != empty_value
 		case "not set":
-			return key.isnull() | (key == "")
+			return key.isnull() if empty_value is None else key.isnull() | (key == empty_value)
 		case _:
 			raise ValueError("`is` operator only supports `set` and `not set` as value")
 

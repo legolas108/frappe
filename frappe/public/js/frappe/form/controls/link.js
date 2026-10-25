@@ -4,7 +4,8 @@
 // link validation
 // custom queries
 // add_fetches
-import Awesomplete from "awesomplete";
+import Awesomplete from "../../ui/awesomplete";
+
 frappe.ui.form.recent_link_validations = {};
 
 frappe.ui.form.ControlLink = class ControlLink extends frappe.ui.form.ControlData {
@@ -14,7 +15,10 @@ frappe.ui.form.ControlLink = class ControlLink extends frappe.ui.form.ControlDat
 		$(`<div class="link-field ui-front" style="position: relative;">
 			<input type="text" class="input-with-feedback form-control">
 			<span class="link-btn">
-				<a class="btn-open" tabIndex='-1' style="display: inline-block;" title="${__("Open Link")}">
+				<a class="btn-clear" style="display: inline-flex;" title="${__("Clear Link")}">
+					${frappe.utils.icon("x", "xs")}
+				</a>
+				<a class="btn-open" style="display: inline-flex;" title="${__("Open Link")}">
 					${frappe.utils.icon("arrow-right", "xs")}
 				</a>
 			</span>
@@ -22,8 +26,15 @@ frappe.ui.form.ControlLink = class ControlLink extends frappe.ui.form.ControlDat
 		this.$input_area = $(this.input_area);
 		this.$input = this.$input_area.find("input");
 		this.$link = this.$input_area.find(".link-btn");
+		this.$link_clear = this.$input_area.find(".btn-clear");
 		this.$link_open = this.$link.find(".btn-open");
 		this.set_input_attributes();
+
+		this.$link_clear.on("click", function () {
+			me.$link.toggle(false);
+			me.$input.val("").focus();
+		});
+
 		this.$input.on("focus", function () {
 			if (!me.$input.val()) {
 				me.$input.val("");
@@ -67,11 +78,17 @@ frappe.ui.form.ControlLink = class ControlLink extends frappe.ui.form.ControlDat
 			const name = this.get_input_value();
 			this.$link.toggle(true);
 			this.$link_open.attr("href", frappe.utils.get_form_link(doctype, name));
+			this.$link_clear.toggle(this.is_clear_button_enabled());
 		}
+	}
+
+	is_clear_button_enabled() {
+		return frappe.defaults.is_enabled("allow_clearing_link_fields");
 	}
 
 	hide_link_and_clear_buttons() {
 		this.$link.toggle(false);
+		this.$link_clear.toggle(false);
 	}
 
 	get_options() {
@@ -242,7 +259,7 @@ frappe.ui.form.ControlLink = class ControlLink extends frappe.ui.form.ControlDat
 				) {
 					html +=
 						'<br><span class="small">' +
-						__(frappe.utils.escape_html(d.description)) +
+						__(frappe.utils.html2text(frappe.utils.escape_html(d.description))) +
 						"</span>";
 				}
 				return $(`<div role="option">`)
@@ -359,7 +376,7 @@ frappe.ui.form.ControlLink = class ControlLink extends frappe.ui.form.ControlDat
 
 		this.$input.on("awesomplete-selectcomplete", function (e) {
 			let o = e.originalEvent;
-			if (o.text.value.indexOf("__link_option") !== -1) {
+			if (cstr(o.text.value).indexOf("__link_option") !== -1) {
 				me.$input.val("");
 			}
 		});
@@ -374,9 +391,12 @@ frappe.ui.form.ControlLink = class ControlLink extends frappe.ui.form.ControlDat
 	 * @returns {boolean} - True if input matches the label, value, or description.
 	 */
 	input_matches_item(input, item) {
-		const item_label = (this.get_translated(item.label || item.value) || "").toLowerCase();
-		const item_description = (item.description || "").toLowerCase();
-		return input && (item_label.includes(input) || item_description.includes(input));
+		return (
+			input &&
+			[this.get_translated(item.label ?? item.value), item.value, item.description].some(
+				(value) => cstr(value).toLowerCase().includes(input)
+			)
+		);
 	}
 
 	/**
@@ -406,11 +426,20 @@ frappe.ui.form.ControlLink = class ControlLink extends frappe.ui.form.ControlDat
 		const doctype = this.get_options();
 		if (!doctype) return;
 
+		const reference_doctype = this.get_reference_doctype() || "";
+		const docfield_parent =
+			this.df?.parent || reference_doctype || (this.frm && this.frm.doctype) || "";
+		const meta_df =
+			docfield_parent && this.df?.fieldname
+				? frappe.meta.get_docfield(docfield_parent, this.df.fieldname)
+				: null;
+
 		const args = {
 			txt,
 			doctype,
-			ignore_user_permissions: this.df.ignore_user_permissions,
-			reference_doctype: this.get_reference_doctype() || "",
+			ignore_user_permissions:
+				this.df?.ignore_user_permissions || meta_df?.ignore_user_permissions,
+			reference_doctype,
 			page_length: cint(frappe.boot.sysdefaults?.link_field_results_limit) || 10,
 			link_fieldname: this.df.fieldname,
 		};
@@ -451,7 +480,7 @@ frappe.ui.form.ControlLink = class ControlLink extends frappe.ui.form.ControlDat
 			cache: use_get,
 			args: args,
 			callback: async (r) => {
-				if (!window.Cypress && !this.$input.is(":focus")) {
+				if (!window.Cypress && !navigator.webdriver && !this.$input.is(":focus")) {
 					return;
 				}
 				r.message = this.merge_duplicates(r.message);
@@ -476,7 +505,8 @@ frappe.ui.form.ControlLink = class ControlLink extends frappe.ui.form.ControlDat
 						r.message.push({
 							html:
 								"<span class='link-option'>" +
-								"<i class='fa fa-plus' style='margin-right: 5px;'></i> " +
+								frappe.utils.icon("plus", "sm", "", "margin-right: 5px;") +
+								" " +
 								__("Create a new {0}", [__(this.get_options())]) +
 								"</span>",
 							label: __("Create a new {0}", [__(this.get_options())]),
@@ -500,7 +530,8 @@ frappe.ui.form.ControlLink = class ControlLink extends frappe.ui.form.ControlDat
 						r.message.push({
 							html:
 								"<span class='link-option'>" +
-								"<i class='fa fa-search' style='margin-right: 5px;'></i> " +
+								frappe.utils.icon("search", "sm", "", "margin-right: 5px;") +
+								" " +
 								__("Advanced Search") +
 								"</span>",
 							label: __("Advanced Search"),
@@ -756,11 +787,6 @@ frappe.ui.form.ControlLink = class ControlLink extends frappe.ui.form.ControlDat
 			return obj;
 		};
 
-		// apply link field filters
-		if (this.df.link_filters && !!this.df.link_filters.length) {
-			this.apply_link_field_filters();
-		}
-
 		if (this.get_query || this.df.get_query) {
 			var get_query = this.get_query || this.df.get_query;
 			if ($.isPlainObject(get_query)) {
@@ -822,17 +848,35 @@ frappe.ui.form.ControlLink = class ControlLink extends frappe.ui.form.ControlDat
 			if (!args.filters) args.filters = {};
 			$.extend(args.filters, this.df.filters);
 		}
+
+		if (this.df.link_filters && !!this.df.link_filters.length) {
+			const link_filters = this.apply_link_field_filters();
+
+			if (Array.isArray(args.filters)) {
+				const doctype = this.get_options();
+				const fieldnames = Object.keys(link_filters);
+				args.filters = args.filters
+					.filter((filter) => {
+						const [filter_doctype, fieldname] =
+							filter.length >= 4 ? filter : [doctype, filter[0]];
+						return filter_doctype !== doctype || !fieldnames.includes(fieldname);
+					})
+					.concat(
+						fieldnames.map((fieldname) => [fieldname, ...link_filters[fieldname]])
+					);
+			} else {
+				args.filters = { ...(args.filters || {}), ...link_filters };
+			}
+		}
 	}
 
 	apply_link_field_filters() {
-		let link_filters = JSON.parse(this.df.link_filters);
-		let filters = this.parse_filters(link_filters);
-		// take filters from the link field and add to the query
-		this.get_query = function () {
-			return {
-				filters,
-			};
-		};
+		try {
+			return this.parse_filters(JSON.parse(this.df.link_filters));
+		} catch (e) {
+			console.error("Invalid link_filters JSON:", this.df.link_filters, e);
+			return {};
+		}
 	}
 
 	parse_filters(link_filters) {
@@ -861,6 +905,11 @@ frappe.ui.form.ControlLink = class ControlLink extends frappe.ui.form.ControlDat
 		}
 
 		return this.validate_link_and_fetch(value);
+	}
+	after_set_value() {
+		for (const target_field of Object.keys(this.fetch_map)) {
+			this.frm.refresh_field(target_field);
+		}
 	}
 	validate_link_and_fetch(value) {
 		const args = this.get_search_args(value);
@@ -932,6 +981,17 @@ frappe.ui.form.ControlLink = class ControlLink extends frappe.ui.form.ControlDat
 			)
 			.then((response) => {
 				if (!response) return;
+
+				const has_filters = !!(args.filters && Object.keys(args.filters).length);
+				if (!response.name && has_filters) {
+					frappe.show_alert({
+						message: __("{0}: {1} did not match any results.", [
+							__(this.df.label || this.df.fieldname),
+							value,
+						]),
+						indicator: "red",
+					});
+				}
 
 				update_dependant_fields(response);
 				return response.name;

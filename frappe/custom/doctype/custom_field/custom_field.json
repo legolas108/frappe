@@ -5,6 +5,7 @@
  "description": "Adds a custom field to a DocType",
  "doctype": "DocType",
  "document_type": "Setup",
+ "documentation": "https://docs.frappe.io/framework/user/en/basics/doctypes/customize",
  "engine": "InnoDB",
  "field_order": [
   "is_system_generated",
@@ -41,6 +42,7 @@
   "unique",
   "is_virtual",
   "read_only",
+  "mask",
   "ignore_user_permissions",
   "hidden",
   "print_hide",
@@ -48,6 +50,7 @@
   "print_width",
   "alignment",
   "no_copy",
+  "set_only_once",
   "allow_on_submit",
   "in_list_view",
   "in_standard_filter",
@@ -57,6 +60,7 @@
   "report_hide",
   "search_index",
   "allow_in_quick_entry",
+  "allow_bulk_edit",
   "ignore_xss_filter",
   "translatable",
   "hide_border",
@@ -132,7 +136,7 @@
    "label": "Field Type",
    "oldfieldname": "fieldtype",
    "oldfieldtype": "Select",
-   "options": "Autocomplete\nAttach\nAttach Image\nBarcode\nButton\nCheck\nCode\nColor\nColumn Break\nCurrency\nData\nDate\nDatetime\nDuration\nDynamic Link\nFloat\nFold\nGeolocation\nHeading\nHTML\nHTML Editor\nIcon\nImage\nInt\nJSON\nLink\nLong Text\nMarkdown Editor\nPassword\nPercent\nPhone\nRead Only\nRating\nSection Break\nSelect\nSignature\nSmall Text\nTab Break\nTable\nTable MultiSelect\nText\nText Editor\nTime",
+   "options": "Autocomplete\nAttach\nAttach Image\nAttachment Gallery\nBarcode\nButton\nCheck\nCode\nColor\nColumn Break\nCurrency\nData\nDate\nDatetime\nDuration\nDynamic Link\nFloat\nFold\nGeolocation\nHeading\nHTML\nHTML Editor\nIcon\nImage\nInt\nJSON\nLink\nLong Text\nMarkdown Editor\nPassword\nPercent\nPhone\nRead Only\nRating\nSection Break\nSelect\nSignature\nSmall Text\nTab Break\nTable\nTable MultiSelect\nText\nText Editor\nTime",
    "reqd": 1,
    "sort_options": 1
   },
@@ -408,6 +412,13 @@
   },
   {
    "default": "0",
+   "depends_on": "eval: doc.fieldtype == \"Table\"",
+   "fieldname": "allow_bulk_edit",
+   "fieldtype": "Check",
+   "label": "Allow Bulk Edit"
+  },
+  {
+   "default": "0",
    "depends_on": "eval:!in_list(['Table', 'Table MultiSelect'], doc.fieldtype);",
    "fieldname": "in_preview",
    "fieldtype": "Check",
@@ -462,10 +473,11 @@
    "label": "Sort Options"
   },
   {
+   "depends_on": "eval:[\"Attachment Gallery\", \"Link\"].includes(doc.fieldtype)",
+   "description": "Filters applied to Link queries and Attachment Gallery files.",
    "fieldname": "link_filters",
    "fieldtype": "JSON",
-   "hidden": 1,
-   "label": "Link Filters"
+   "label": "Filters"
   },
   {
    "default": "0",
@@ -484,6 +496,19 @@
    "fieldtype": "Select",
    "label": "Button Color",
    "options": "\nDefault\nPrimary\nInfo\nSuccess\nWarning\nDanger"
+  },
+  {
+   "default": "0",
+   "fieldname": "set_only_once",
+   "fieldtype": "Check",
+   "label": "Set only once"
+  },
+  {
+   "default": "0",
+   "depends_on": "eval:[\"Select\", \"Read Only\", \"Phone\", \"Percent\", \"Password\", \"Link\", \"Int\", \"Float\", \"Dynamic Link\", \"Duration\", \"Datetime\", \"Currency\", \"Data\", \"Date\"].includes(doc.fieldtype)",
+   "fieldname": "mask",
+   "fieldtype": "Check",
+   "label": "Mask"
   }
  ],
  "grid_page_length": 50,
@@ -491,7 +516,7 @@
  "idx": 1,
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2025-11-12 01:14:24.753774",
+ "modified": "2026-07-17 14:00:00.000000",
  "modified_by": "Administrator",
  "module": "Custom",
  "name": "Custom Field",

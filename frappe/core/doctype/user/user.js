@@ -3,8 +3,7 @@ frappe.ui.form.on("User", {
 		frm.set_query("default_workspace", () => {
 			return {
 				filters: {
-					for_user: ["in", [null, frappe.session.user]],
-					title: ["!=", "Welcome Workspace"],
+					for_user: ["in", ["", frappe.session.user]],
 				},
 			};
 		});
@@ -69,6 +68,8 @@ frappe.ui.form.on("User", {
 			frm.roles_editor.reset();
 		}
 
+		frm.fields_dict.new_password?.$input?.attr("autocomplete", "new-password");
+
 		if (
 			frm.can_edit_roles &&
 			!frm.is_new() &&
@@ -85,7 +86,7 @@ frappe.ui.form.on("User", {
 					frm.doc.role_profiles && frm.doc.role_profiles.length ? 1 : 0
 				);
 
-				if (frm.doc.user_type == "System User") {
+				if (frm.doc.user_type == "System User" && frm.doc.__onload?.all_modules) {
 					var module_area = $("<div>").appendTo(frm.fields_dict.modules_html.wrapper);
 					frm.module_editor = new frappe.ModuleEditor(
 						frm,
@@ -101,9 +102,14 @@ frappe.ui.form.on("User", {
 	refresh: function (frm) {
 		let doc = frm.doc;
 
+		frappe.scroll_to_user_roles_field = function () {
+			frappe.hide_msgprint(true);
+			frm.scroll_to_field("roles_html");
+		};
+
 		frappe.xcall("frappe.apps.get_apps").then((r) => {
 			let apps = r?.map((r) => r.name) || [];
-			frm.set_df_property("default_app", "options", [" ", ...apps]);
+			frm.set_df_property("default_app", "options", ["", ...apps]);
 		});
 
 		if (frm.is_new()) {
@@ -121,6 +127,9 @@ frappe.ui.form.on("User", {
 		}
 
 		frm.toggle_display(["sb1", "sb3", "modules_access"], false);
+		if (frm.is_new() && has_access_to_edit_user()) {
+			frm.toggle_display(["sb1", "sb3", "modules_access"], true);
+		}
 		frm.trigger("setup_impersonation");
 
 		if (!frm.is_new()) {
@@ -155,6 +164,17 @@ frappe.ui.form.on("User", {
 				);
 
 				frm.toggle_display(["sb1", "sb3", "modules_access"], true);
+			}
+
+			if (cint(frm.doc.enabled) && frm.has_perm("write")) {
+				frm.add_custom_button(
+					__("Change Password"),
+					() =>
+						frappe.ui.show_change_password_dialog(frm.doc.name, () =>
+							frm.reload_doc()
+						),
+					__("Password")
+				);
 			}
 
 			frm.add_custom_button(
@@ -221,7 +241,7 @@ frappe.ui.form.on("User", {
 			}
 
 			if (
-				cint(frappe.boot.sysdefaults.enable_two_factor_auth) &&
+				frappe.defaults.is_enabled("enable_two_factor_auth") &&
 				(frappe.session.user == doc.name || frappe.user.has_role("System Manager"))
 			) {
 				frm.add_custom_button(
@@ -372,8 +392,8 @@ frappe.ui.form.on("User", {
 	},
 	setup_impersonation: function (frm) {
 		if (
-			frappe.session.user === "Administrator" &&
-			frm.doc.name != "Administrator" &&
+			(frappe.session.user === "Administrator" || frm.has_perm("impersonate")) &&
+			frm.doc.name !== frappe.session.user &&
 			!frm.is_new()
 		) {
 			frm.add_custom_button(__("Impersonate"), () => {
@@ -429,18 +449,22 @@ frappe.ui.form.on("User Email", {
 frappe.ui.form.on("User Role Profile", {
 	role_profiles_add: function (frm) {
 		if (frm.doc.role_profiles.length > 0) {
-			frm.roles_editor.disable = 1;
+			if (frm.roles_editor) {
+				frm.roles_editor.disable = 1;
+			}
 			frm.call("populate_role_profile_roles").then(() => {
-				frm.roles_editor.show();
+				if (frm.roles_editor) {
+					frm.roles_editor.show();
+				}
 			});
-			$(".deselect-all, .select-all").prop("disabled", true);
 		}
 	},
 	role_profiles_remove: function (frm) {
 		if (frm.doc.role_profiles.length == 0) {
-			frm.roles_editor.disable = 0;
-			frm.roles_editor.show();
-			$(".deselect-all, .select-all").prop("disabled", false);
+			if (frm.roles_editor) {
+				frm.roles_editor.disable = 0;
+				frm.roles_editor.show();
+			}
 		}
 	},
 });

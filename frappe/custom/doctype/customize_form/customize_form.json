@@ -4,6 +4,7 @@
  "creation": "2013-01-29 17:55:08",
  "doctype": "DocType",
  "document_type": "Document",
+ "documentation": "https://docs.frappe.io/erpnext/user/manual/en/customize-form",
  "editable_grid": 1,
  "engine": "InnoDB",
  "field_order": [
@@ -24,6 +25,7 @@
   "track_views",
   "allow_auto_repeat",
   "allow_import",
+  "allow_bulk_edit",
   "queue_in_background",
   "naming_section",
   "naming_rule",
@@ -32,6 +34,7 @@
   "image_field",
   "max_attachments",
   "column_break_21",
+  "hide_toolbar",
   "allow_copy",
   "make_attachments_public",
   "protect_attached_files",
@@ -104,6 +107,12 @@
    "fieldname": "max_attachments",
    "fieldtype": "Int",
    "label": "Max Attachments"
+  },
+  {
+   "default": "0",
+   "fieldname": "hide_toolbar",
+   "fieldtype": "Check",
+   "label": "Hide Sidebar, Menu, and Comments"
   },
   {
    "default": "0",
@@ -214,6 +223,14 @@
    "fieldname": "allow_import",
    "fieldtype": "Check",
    "label": "Allow Import (via Data Import Tool)"
+  },
+  {
+   "default": "1",
+   "depends_on": "istable",
+   "description": "Enable bulk edit for child table fields in Form view.",
+   "fieldname": "allow_bulk_edit",
+   "fieldtype": "Check",
+   "label": "Allow Bulk Edit"
   },
   {
    "depends_on": "email_append_to",
