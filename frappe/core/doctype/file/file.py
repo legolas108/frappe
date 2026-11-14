@@ -4,10 +4,13 @@
 import io
 import mimetypes
 import os
+import posixpath
 import re
 import shutil
 import zipfile
 from urllib.parse import quote, unquote
+
+import filetype
 
 import frappe
 from frappe import _
@@ -104,6 +107,7 @@ class File(Document):
 			self.attached_to_field = None
 		# Ensure correct formatting and type
 		self.file_url = unquote(self.file_url) if self.file_url else ""
+		self.normalize_file_url()
 
 		self.set_folder_name()
 		self.set_is_private()
@@ -222,6 +226,29 @@ class File(Document):
 			except PermissionError:
 				frappe.throw(_("Only System Managers can make this file public."))
 
+	def normalize_file_url(self):
+		"""Collapse `.` and `//` segments in a local file URL; reject `..`.
+
+		The private-file access check matches `file_url` literally, but the path is
+		resolved on disk after normalization. Without this, `/private/files/./secret.pdf`
+		slips past the check as a new URL while still reading `secret.pdf` from disk.
+		Pinning every row to the canonical URL keeps the two views in step.
+		"""
+		if not self.file_url or self.is_remote_file:
+			return
+
+		if ".." in self.file_url.split("/"):
+			frappe.throw(_("The File URL you've entered is incorrect"), title=_("Invalid File URL"))
+
+		for prefix in ("/private/files/", "/files/"):
+			if not self.file_url.startswith(prefix):
+				continue
+			name = posixpath.normpath("/" + self.file_url[len(prefix) :].lstrip("/")).lstrip("/")
+			if not name or name == ".":
+				frappe.throw(_("The File URL you've entered is incorrect"), title=_("Invalid File URL"))
+			self.file_url = prefix + name
+			return
+
 	def validate_private_file_access(self):
 		"""Validate that the user has permission to access an existing private file."""
 		if not self.file_url:
@@ -261,7 +288,7 @@ class File(Document):
 			frappe.throw(_("Cannot delete Home and Attachments folders"))
 		self.validate_empty_folder()
 		self.validate_protected_file()
-		self._delete_file_on_disk()
+		frappe.db.after_commit.add(self._delete_file_on_disk)
 		if not self.is_folder:
 			self.add_comment_in_reference_doc("Attachment Removed", self.file_name)
 
@@ -385,13 +412,23 @@ class File(Document):
 		):
 			return
 
-		if frappe.get_meta(self.attached_to_doctype).issingle:
-			frappe.db.set_single_value(
-				self.attached_to_doctype,
-				self.attached_to_field,
-				self.file_url,
-			)
-		else:
+		parent_meta = frappe.get_meta(self.attached_to_doctype)
+
+		if parent_meta.issingle:
+			if (
+				parent_meta.has_field(self.attached_to_field)
+				and frappe.db.get_single_value(self.attached_to_doctype, self.attached_to_field)
+				== old_file_url
+			):
+				frappe.db.set_single_value(
+					self.attached_to_doctype,
+					self.attached_to_field,
+					self.file_url,
+				)
+		elif parent_meta.has_field(self.attached_to_field) and frappe.db.exists(
+			self.attached_to_doctype,
+			{"name": self.attached_to_name, self.attached_to_field: old_file_url},
+		):
 			frappe.db.set_value(
 				self.attached_to_doctype,
 				self.attached_to_name,
@@ -647,7 +684,7 @@ class File(Document):
 
 	def unzip(self) -> list["File"]:
 		"""Unzip current file and replace it by its children"""
-		from frappe.core.api.file import get_max_extract_size
+		from frappe.core.api.file import get_max_extract_members, get_max_extract_size
 
 		if not self.file_url.endswith(".zip"):
 			frappe.throw(_("{0} is not a zip file").format(self.file_name))
@@ -667,6 +704,13 @@ class File(Document):
 				if not (file.is_dir() or file.filename.startswith("__MACOSX/"))
 				and not os.path.basename(file.filename).startswith(".")
 			]
+
+			if len(members) > get_max_extract_members():
+				frappe.throw(
+					_("Zip file contains more than the maximum allowed {0} files").format(
+						get_max_extract_members()
+					)
+				)
 
 			# Reject on declared (central directory) sizes before reading any member,
 			# so a small, highly compressible archive can't force large reads/writes.
@@ -738,7 +782,9 @@ class File(Document):
 			encodings = FILE_ENCODING_OPTIONS
 		with open(file_path, mode="rb") as f:
 			self._content = f.read()
-			if not self._content.startswith(OLE_FILE_SIGNATURE):
+			# Only decode if not a binary file
+			kind = filetype.guess(self._content)
+			if not kind and not self._content.startswith(OLE_FILE_SIGNATURE):
 				# looping will not result in slowdown, as the content is usually utf-8 or utf-8-sig
 				# encoded so the first iteration will be enough most of the time
 				for encoding in encodings:
@@ -846,7 +892,7 @@ class File(Document):
 		self.content_hash = get_content_hash(self._content)
 
 		# check if a file exists with the same content hash and is also in the same folder (public or private)
-		if not ignore_existing_file_check:
+		if not ignore_existing_file_check and not overwrite:
 			duplicate_file = frappe.get_value(
 				"File",
 				{"content_hash": self.content_hash, "is_private": self.is_private},
@@ -865,7 +911,14 @@ class File(Document):
 				file_exists = True
 
 		if not file_exists:
-			if not overwrite:
+			# rewrite in place only the file this record alone points to; file_name can differ from file_url
+			in_place = (
+				overwrite
+				and self.file_url
+				and not frappe.db.exists("File", {"file_url": self.file_url, "name": ("!=", self.name)})
+			)
+			if not in_place:
+				self.flags.pop("original_content", None)
 				self.file_name = generate_file_name(
 					name=self.file_name,
 					suffix=self.content_hash[-6:],
@@ -875,6 +928,9 @@ class File(Document):
 			write_file_method = get_hook_method("write_file")
 			if write_file_method:
 				return write_file_method(self)
+			if in_place:
+				self.write_file()
+				return {"file_name": self.file_name, "file_url": self.file_url}
 			return self.save_file_on_filesystem()
 
 	def save_file_on_filesystem(self):
@@ -960,6 +1016,7 @@ class File(Document):
 
 	@frappe.whitelist()
 	def optimize_file(self):
+		frappe.has_permission(self.doctype, "write", self.name, throw=True)
 		if self.is_folder:
 			raise TypeError("Folders cannot be optimized")
 
@@ -1002,17 +1059,22 @@ class File(Document):
 
 	@staticmethod
 	def zip_files(files):
+		requested, added = set(), set()
 		zip_file = io.BytesIO()
 		zf = zipfile.ZipFile(zip_file, "w", zipfile.ZIP_DEFLATED)
 		for _file in files:
 			if isinstance(_file, str):
+				if _file in requested:
+					continue
+				requested.add(_file)
 				_file = frappe.get_doc("File", _file)
 			if not isinstance(_file, File):
 				continue
-			if _file.is_folder:
+			if _file.is_folder or _file.name in added:
 				continue
 			if not has_permission(_file, "read"):
 				continue
+			added.add(_file.name)
 			zf.writestr(_file.file_name, _file.get_content())
 		zf.close()
 		return zip_file.getvalue()

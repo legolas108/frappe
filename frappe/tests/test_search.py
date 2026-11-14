@@ -9,7 +9,14 @@ from unittest.mock import patch
 
 import frappe
 from frappe.core.doctype.doctype.test_doctype import new_doctype
-from frappe.desk.search import awesomebar_search, get_names_for_mentions, search_link, search_widget
+from frappe.desk.link_title import get_report_link_titles
+from frappe.desk.search import (
+	awesomebar_search,
+	get_link_title,
+	get_names_for_mentions,
+	search_link,
+	search_widget,
+)
 from frappe.permissions import add_user_permission
 from frappe.tests import IntegrationTestCase
 from frappe.tests.utils import whitelist_for_tests
@@ -314,6 +321,28 @@ class TestSearch(IntegrationTestCase):
 		search = partial(search_link, doctype="Language", filters=None, page_length=10)
 		result = search(txt="(txt)")
 		self.assertEqual(result, [])
+
+	def test_search_link_ignore_user_permissions_without_field_logs_one_line(self):
+		import io
+		import logging
+
+		logger = frappe.logger()
+		stream = io.StringIO()
+		handler = logging.StreamHandler(stream)
+		handler.setFormatter(logger.handlers[0].formatter)
+		logger.addHandler(handler)
+		self.addCleanup(logger.removeHandler, handler)
+
+		injected = "Other\n2026-07-28 12:00:00,000 INFO frappe forged entry"
+		frappe.set_user("test@example.com")
+		self.addCleanup(frappe.set_user, "Administrator")
+		frappe.local.form_dict = frappe._dict(reference_doctype=injected, ignore_user_permissions=1)
+		search_link("User", "a", reference_doctype=injected, ignore_user_permissions=True)
+
+		lines = stream.getvalue().splitlines()
+		self.assertFalse([line for line in lines if line.startswith("2026-07-28")])
+		self.assertTrue(any("Ignoring flag." in line for line in lines))
+		self.assertTrue(any(line.startswith("Form Dict:") and "Other\\n2026-07-28" in line for line in lines))
 
 	def test_search_link_with_ignore_user_permissions(self):
 		"""Test that ignore_user_permissions works correctly in search_link
@@ -798,6 +827,75 @@ class TestSearch(IntegrationTestCase):
 				reference_doctype="Test Search Dangling Parent",
 				link_fieldname="nonexistent_field",
 			)
+
+	def test_select_permission_shows_link_titles(self):
+		doctype, name, user = self.make_select_only_titled_doc()
+
+		with self.set_user(user):
+			self.assertFalse(frappe.has_permission(doctype, "read", name))
+			self.assertEqual(get_link_title(doctype, name), "Selectable Title")
+			self.assertEqual(search_link(doctype, "")[0].get("label"), "Selectable Title")
+			self.assertEqual(
+				self.get_report_titles(doctype, name), {f"{doctype}::{name}": "Selectable Title"}
+			)
+
+	def test_select_permission_hides_restricted_link_titles(self):
+		doctype, name, user = self.make_select_only_titled_doc(permlevel=1)
+
+		with self.set_user(user):
+			self.assertEqual(get_link_title(doctype, name), name)
+			self.assertNotEqual(search_link(doctype, "")[0].get("label"), "Selectable Title")
+			self.assertEqual(self.get_report_titles(doctype, name), {})
+
+	def test_select_permission_hides_restricted_link_titles_in_search_fields(self):
+		doctype, name, user = self.make_select_only_titled_doc(permlevel=1, search_fields="title")
+
+		with self.set_user(user):
+			self.assertEqual(get_link_title(doctype, name), name)
+			self.assertNotEqual(search_link(doctype, "")[0].get("label"), "Selectable Title")
+			self.assertEqual(self.get_report_titles(doctype, name), {})
+
+	def test_select_permission_skips_virtual_link_titles_in_reports(self):
+		doctype, name, user = self.make_select_only_titled_doc(is_virtual=1, options="'Virtual Title'")
+
+		with self.set_user(user):
+			self.assertEqual(self.get_report_titles(doctype, name), {})
+
+	def test_select_permission_skips_virtual_search_link_titles_in_reports(self):
+		doctype, name, user = self.make_select_only_titled_doc(
+			is_virtual=1, options="'Virtual Title'", search_fields="title"
+		)
+
+		with self.set_user(user):
+			self.assertEqual(self.get_report_titles(doctype, name), {})
+
+	def get_report_titles(self, doctype, name):
+		return get_report_link_titles(
+			[{"fieldname": "link", "fieldtype": "Link", "options": doctype}], [{"link": name}]
+		)
+
+	def make_select_only_titled_doc(self, *, search_fields=None, **title_properties):
+		with self.set_user("Administrator"):
+			role = frappe.new_doc("Role", role_name=frappe.generate_hash()).insert().name
+			doctype = new_doctype(
+				fields=[
+					{"fieldname": "code", "fieldtype": "Data", "label": "Code"},
+					{"fieldname": "title", "fieldtype": "Data", "label": "Title", **title_properties},
+				],
+				title_field="title",
+				search_fields=search_fields,
+				show_title_field_in_link=1,
+				permissions=[{"role": role, "select": 1, "read": 0}],
+			).insert()
+			name = frappe.get_doc(doctype=doctype.name, title="Selectable Title").insert().name
+			user = frappe.get_doc(
+				doctype="User",
+				email=f"select-{frappe.generate_hash(length=8)}@example.com",
+				first_name="Select Only",
+				send_welcome_email=0,
+				roles=[{"role": role}],
+			).insert()
+			return doctype.name, name, user.name
 
 	def test_awesomebar_search_hook(self):
 		real_get_hooks = frappe.get_hooks

@@ -737,7 +737,7 @@ def get_context(context):
 			or (
 				frappe.db.get_value("Print Format", self.print_format, "default_print_language")
 				if self.print_format
-				else "en"
+				else None
 			),
 		}
 
@@ -882,11 +882,10 @@ def evaluate_alert(doc: Document, alert, event=None):
 		)
 		frappe.throw(message, title=_("Error in Notification"))
 	except Exception as e:
-		title = str(e)
+		title = str(e) or type(e).__name__
 		message = frappe.get_traceback(with_context=True)
 		frappe.log_error(title=title, message=message)
-		msg = f"<details><summary>{title}</summary>{message}</details>"
-		frappe.throw(msg, title=_("Error in Notification"))
+		frappe.throw(title, title=_("Error in Notification"))
 
 
 def get_comments_for_context(doc):

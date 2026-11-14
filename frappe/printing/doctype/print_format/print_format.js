@@ -163,7 +163,7 @@ frappe.ui.form.on("Print Format", {
 			is_builder &&
 			frm.is_new() &&
 			!is_custom &&
-			!["Typst", "WeasyPrint"].includes(frm.doc.pdf_generator);
+			!["PlutoPrint", "Typst", "WeasyPrint"].includes(frm.doc.pdf_generator);
 		if (should_force_chrome) {
 			frm.set_value("pdf_generator", "chrome");
 		}
@@ -190,7 +190,6 @@ frappe.ui.form.on("Print Format", {
 	},
 	print_format_for: function (frm) {
 		if (frm.doc.print_format_for === "Report") {
-			frm.set_value("standard", "No");
 			frm.set_value("custom_format", 1);
 		}
 	},

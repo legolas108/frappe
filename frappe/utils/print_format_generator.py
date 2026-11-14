@@ -6,6 +6,8 @@ import re
 from typing import ClassVar
 from urllib.parse import quote
 
+from bs4 import BeautifulSoup
+
 import frappe
 from frappe import _
 from frappe.printing.doctype.print_format.classic_converter import uses_legacy_weasyprint
@@ -108,6 +110,15 @@ def generator_from_print_context(print_format) -> "PrintFormatGenerator | None":
 		ctx.get("letterhead"),
 		settings=frappe.parse_json(ctx.get("settings")) if ctx.get("settings") else None,
 		no_letterhead=ctx.get("no_letterhead"),
+	)
+
+
+def render_html_pdf(print_format, html, options, pdf_generator):
+	from frappe.utils.pdf import get_chrome_pdf, get_plutoprint_pdf
+
+	render = get_plutoprint_pdf if pdf_generator == "PlutoPrint" else get_chrome_pdf
+	return render(
+		print_format=print_format, html=html, options=options, output=None, pdf_generator=pdf_generator
 	)
 
 
@@ -400,20 +411,25 @@ def check_conditions(doctype: str, name: str, conditions: list[str] | str):
 	"""Evaluate visibility conditions against a document the way the print does.
 	Returns {condition: {"visible": bool} | {"error": str}}; at most MAX_CONDITIONS
 	distinct expressions are evaluated per call."""
+	frappe.has_permission("Print Format", "write", throw=True)
 	conditions = frappe.parse_json(conditions) if isinstance(conditions, str) else conditions
 	if not all(isinstance(v, str) for v in (doctype, name)) or not isinstance(conditions, list):
 		frappe.throw(_("Invalid arguments"), frappe.ValidationError)
 	conditions = list(dict.fromkeys(c for c in conditions if c.strip() and len(c) <= 2000))[:MAX_CONDITIONS]
 	doc = frappe.get_doc(doctype, name)
 	doc.check_permission("read")
-	eval_locals = {"doc": doc, "print_settings": frappe.get_cached_doc("Print Settings")}
+	eval_locals = condition_locals(doc, frappe.get_cached_doc("Print Settings"))
 	out = {}
 	for condition in conditions:
 		try:
 			out[condition] = {"visible": bool(frappe.safe_eval(condition, None, eval_locals))}
-		except Exception as e:
-			out[condition] = {"error": str(e)[:200]}
+		except Exception:
+			out[condition] = {"error": _("This condition could not be evaluated")}
 	return out
+
+
+def condition_locals(doc, print_settings) -> dict:
+	return {"doc": doc.as_dict(), "print_settings": print_settings.as_dict()}
 
 
 class PrintFormatGenerator:
@@ -575,12 +591,16 @@ class PrintFormatGenerator:
 		Renderers other than the built-in Chromium are resolved through the
 		`pdf_generator` hook, so an app can register its own the same way the
 		Typst renderer is."""
-		from frappe.utils.pdf import get_chrome_pdf
+		from frappe.utils.print_utils import HTML_PDF_GENERATORS
 
 		pf = self.print_format
 		generator_name = pf.get("pdf_generator") or "chrome"
-		# chrome renders below; wkhtmltopdf never reached hooks before this branch either
-		if generator_name not in ("chrome", "wkhtmltopdf"):
+		if generator_name == "PlutoPrint":
+			from frappe.utils.print_utils import resolve_pdf_generator
+
+			generator_name = resolve_pdf_generator(pf)
+		# chrome and PlutoPrint render below; wkhtmltopdf never reached hooks before this branch either
+		if generator_name not in (*HTML_PDF_GENERATORS, "wkhtmltopdf"):
 			previous = set_print_context(
 				doctype=self.doc.doctype,
 				name=self.doc.name,
@@ -629,22 +649,17 @@ class PrintFormatGenerator:
 		background = self.layout.get("background")
 		if background:
 			options.pop("password", None)
-		pdf = get_chrome_pdf(
-			print_format=pf.name,
-			html=html,
-			options=options,
-			output=None,
-			pdf_generator="chrome",
-		)
-		return self.underlay_background(pdf, background, password) if background else pdf
+		html_generator = generator_name if generator_name in HTML_PDF_GENERATORS else "chrome"
+		pdf = render_html_pdf(pf.name, html, options, html_generator)
+		return self.underlay_background(pdf, background, password, html_generator) if background else pdf
 
-	def underlay_background(self, pdf: bytes, background: dict, password: str | None = None) -> bytes:
+	def underlay_background(
+		self, pdf: bytes, background: dict, password: str | None = None, pdf_generator: str = "chrome"
+	) -> bytes:
 		"""Draw the page background under every page of ``pdf``, edge to edge."""
 		from io import BytesIO
 
 		from pypdf import PdfReader, PdfWriter
-
-		from frappe.utils.pdf import get_chrome_pdf
 
 		width, height = page_size_mm(self.print_settings)
 		html = (
@@ -655,13 +670,7 @@ class PrintFormatGenerator:
 		)
 		options = {"margin-top": "0mm", "margin-bottom": "0mm", "margin-left": "0mm", "margin-right": "0mm"}
 		options.update(self.page_options())
-		background_pdf = get_chrome_pdf(
-			print_format=self.print_format.name,
-			html=html,
-			options=options,
-			output=None,
-			pdf_generator="chrome",
-		)
+		background_pdf = render_html_pdf(self.print_format.name, html, options, pdf_generator)
 		background_page = PdfReader(BytesIO(background_pdf)).pages[0]
 		writer = PdfWriter(clone_from=BytesIO(pdf))
 		for page in writer.pages:
@@ -887,7 +896,7 @@ class PrintFormatGenerator:
 
 	def _render_zone_section(self, section: dict, doc, zone_class: str = "") -> str:
 		"""Render a header/footer zone section dict to HTML for the Chrome overlay."""
-		eval_locals = {"doc": doc, "print_settings": self.print_settings}
+		eval_locals = condition_locals(doc, self.print_settings)
 		for column in section.get("columns", []):
 			for df in column.get("fields", []):
 				if "renderer" not in df:
@@ -1004,7 +1013,14 @@ class PrintFormatGenerator:
 			fields = [
 				df
 				for df in column.get("fields", [])
-				if self.has_field_access(self.doc, meta, df.get("fieldname"), df.get("source_fieldname"))
+				if self.has_field_access(
+					self.doc,
+					meta,
+					df.get("fieldname"),
+					df.get("source_fieldname")
+					or (df.get("fieldtype") == "Repeater" and df.get("source"))
+					or (df.get("custom") and df.get("barcode_field")),
+				)
 			]
 			column["fields"] = fields
 			for df in fields:
@@ -1049,7 +1065,7 @@ class PrintFormatGenerator:
 		empty across all rows, then renormalize widths. A bad condition fails open."""
 		from frappe.www.printview import column_has_value
 
-		eval_locals = {"doc": self.doc, "print_settings": self.print_settings}
+		eval_locals = condition_locals(self.doc, self.print_settings)
 		for column in iter_layout_columns(layout):
 			for df in column.get("fields", []):
 				if df.get("fieldtype") != "Table" or not df.get("table_columns"):
@@ -1112,9 +1128,10 @@ class PrintFormatGenerator:
 		self.prepare_linked_field(df)
 		self.prepare_date_format(df)
 		self.filter_conditional_rows(df)
+		self.prepare_html(df)
 
 	def set_field_renderers(self, layout):
-		eval_locals = {"doc": self.doc, "print_settings": self.print_settings}
+		eval_locals = condition_locals(self.doc, self.print_settings)
 		for section in layout["sections"]:
 			if section.get("visible_if"):
 				section["_hidden"] = not self.eval_condition(
@@ -1138,12 +1155,19 @@ class PrintFormatGenerator:
 		if not df.get("row_condition") or not source:
 			return
 		condition = df["row_condition"]
-		eval_locals = {"doc": self.doc, "print_settings": self.print_settings}
+		eval_locals = condition_locals(self.doc, self.print_settings)
 		kept = []
 		for row in self.doc.get(source) or []:
-			if self.eval_condition(condition, {**eval_locals, "row": row}, f"rows of {source}"):
+			if self.eval_condition(condition, {**eval_locals, "row": row.as_dict()}, f"rows of {source}"):
 				kept.append(row)
 		df["_rows"] = kept
+
+	def prepare_html(self, df):
+		if df.get("renderer") == "HTML" and not df.get("_hidden"):
+			rendered = frappe.render_template(  # nosemgrep: frappe-semgrep-rules.rules.security.frappe-ssti
+				df.get("html") or "", {"doc": self.doc}
+			)
+			df["_html"] = BeautifulSoup(f"<body>{rendered}</body>", "html5lib").body.decode_contents()
 
 	def prepare_barcode(self, df):
 		"""Resolve JsBarcode options / QR data URI for Barcode layout elements."""
