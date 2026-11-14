@@ -168,7 +168,7 @@ body[data-route^="Form"] {
 
 .page-form {
 	margin: 0;
-	padding: var(--padding-xs) var(--padding-md);
+	padding: 0 var(--padding-md);
 	display: flex;
 	flex-wrap: wrap;
 	background-color: var(--card-bg);
