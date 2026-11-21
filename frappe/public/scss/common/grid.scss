@@ -313,7 +313,7 @@
 	}
 
 	.btn-open-row {
-		padding-right: 6px;
+		padding-right: 0px;
 		line-height: 1rem;
 
 		div {
@@ -863,8 +863,8 @@
 	.grid-row > .row .col:last-child:not(.grid-data-last),
 	.grid-row > .dialog-assignment-row .col:first-child,
 	.grid-row > .dialog-assignment-row .col:last-child {
-		max-width: 30px;
-		min-width: 30px;
+		max-width: 70px;
+		min-width: 70px;
 		position: sticky;
 		right: 0;
 		z-index: 1;

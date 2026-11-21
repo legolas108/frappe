@@ -10,6 +10,9 @@ from frappe.model.db_query import get_timespan_date_range
 from frappe.query_builder import Field
 from frappe.utils import cstr
 
+from pypika.enums import Comparator
+from pypika.terms import BasicCriterion
+
 
 def like(key: Field, value: str) -> frappe.qb:
 	"""Wrapper method for `LIKE`
@@ -82,6 +85,9 @@ def func_not_in(key: Field, value: list | tuple | str):
 	return key.notin(value)
 
 
+class RegexpComparator(Comparator):
+  regexp = " REGEXP "
+
 def func_regex(key: Field, value: str) -> frappe.qb:
 	"""Wrapper method for `REGEX`
 
@@ -92,7 +98,10 @@ def func_regex(key: Field, value: str) -> frappe.qb:
 	Return:
 	        frappe.qb: `frappe.qb` object with `REGEX`
 	"""
-	return key.regex(value)
+	# return key.regex(value)
+
+	# fix "REGEX" bug
+	return BasicCriterion(RegexpComparator.regexp, key, key.wrap_constant(value))
 
 
 def func_between(key: Field, value: list | tuple) -> frappe.qb:
